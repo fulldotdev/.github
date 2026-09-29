@@ -1,0 +1,48 @@
+name: Check
+
+# Required on every pull request in the organization through the "Merge policy" ruleset.
+# Runs the repository's own `check` script. Repositories without one pass with a notice.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Find the check script
+        id: scripts
+        run: |
+          if [ -f package.json ] && [ -f pnpm-lock.yaml ] && node -e "process.exit(require('./package.json').scripts?.check ? 0 : 1)"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No pnpm project with a check script. Nothing to run."
+          fi
+
+      - if: steps.scripts.outputs.run == 'true'
+        uses: pnpm/action-setup@v6
+
+      - if: steps.scripts.outputs.run == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - if: steps.scripts.outputs.run == 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - if: steps.scripts.outputs.run == 'true'
+        run: pnpm check
