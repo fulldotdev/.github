@@ -41,13 +41,13 @@ jobs:
       - if: steps.scripts.outputs.run == 'true'
         run: corepack enable
 
-      # Later pushes to the same pull request skip the install.
+      # Later pushes to the same pull request skip the install while dependencies are unchanged.
       - if: steps.scripts.outputs.run == 'true'
         id: modules
         uses: actions/cache@v6
         with:
           path: node_modules
-          key: modules-${{ runner.os }}-node24-${{ hashFiles('pnpm-lock.yaml') }}
+          key: modules-${{ runner.os }}-node24-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', '**/package.json') }}
 
       - if: steps.scripts.outputs.run == 'true' && steps.modules.outputs.cache-hit != 'true'
         run: pnpm install --frozen-lockfile --ignore-scripts
