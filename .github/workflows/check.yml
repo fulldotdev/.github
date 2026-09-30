@@ -33,15 +33,23 @@ jobs:
           fi
 
       - if: steps.scripts.outputs.run == 'true'
-        uses: pnpm/action-setup@v6
-
-      - if: steps.scripts.outputs.run == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 24
-          cache: pnpm
 
+      # Corepack starts the pnpm version from `packageManager` faster than pnpm/action-setup.
       - if: steps.scripts.outputs.run == 'true'
+        run: corepack enable
+
+      # Later pushes to the same pull request skip the install.
+      - if: steps.scripts.outputs.run == 'true'
+        id: modules
+        uses: actions/cache@v6
+        with:
+          path: node_modules
+          key: modules-${{ runner.os }}-node24-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - if: steps.scripts.outputs.run == 'true' && steps.modules.outputs.cache-hit != 'true'
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - if: steps.scripts.outputs.run == 'true'
