@@ -54,3 +54,21 @@ jobs:
 
       - if: steps.scripts.outputs.run == 'true'
         run: pnpm check
+
+  # Temporary, for the CloudCannon setup only: merges a CloudCannon publication
+  # (preview into main) once all required checks pass. Remove when the sites
+  # move to the new CMS.
+  cloudcannon-auto-merge:
+    name: CloudCannon auto-merge
+    needs: check
+    if: github.event.pull_request.user.login == 'cloudcannon[bot]' && github.head_ref == 'preview' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - run: gh pr merge "$PR" --repo "$REPO" --auto --squash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
