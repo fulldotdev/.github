@@ -1,0 +1,78 @@
+---
+name: Check preview (temporary)
+"on":
+  pull_request: 
+permissions:
+  contents: read
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      pnpm_config_ignore_scripts: 'true'
+      pnpm_config_ignore_pnpmfile: 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+        fetch-depth: 2
+    - name: Find the check script
+      id: scripts
+      run: |
+        # Prints what a commit lacks to be a pnpm project with a check script.
+        missing() {
+          git cat-file -e "$1:package.json" 2>/dev/null || echo "package.json"
+          git cat-file -e "$1:pnpm-lock.yaml" 2>/dev/null || echo "pnpm-lock.yaml"
+          git show "$1:package.json" 2>/dev/null |
+            node -e 'process.exit(JSON.parse(require("fs").readFileSync(0, "utf8")).scripts?.check ? 0 : 1)' 2>/dev/null ||
+            echo "a check script in package.json"
+        }
+
+        # A pull request is checked out as a merge commit: the base branch, then the pull request.
+        if ! git rev-parse --verify --quiet HEAD^2 >/dev/null; then
+          echo "::error::Expected a pull request merge commit with the base branch as its first parent."
+          exit 1
+        fi
+
+        head_missing=$(missing HEAD)
+        base_missing=$(missing HEAD^1)
+
+        if [ -z "$head_missing" ]; then
+          echo "run=true" >> "$GITHUB_OUTPUT"
+        elif [ -z "$base_missing" ]; then
+          echo "::error::$GITHUB_BASE_REF is a pnpm project with a check script, but this pull request removes: $(echo "$head_missing" | paste -sd, - | sed 's/,/, /g'). Restore it so the check can run."
+          exit 1
+        else
+          echo "No pnpm project with a check script on $GITHUB_BASE_REF or in this pull request. Nothing to run."
+        fi
+    - if: steps.scripts.outputs.run == 'true'
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: 24
+    - if: steps.scripts.outputs.run == 'true'
+      run: corepack enable
+    - if: steps.scripts.outputs.run == 'true'
+      id: store
+      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+    - if: steps.scripts.outputs.run == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: "${{ steps.store.outputs.path }}"
+        key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: pnpm-store-${{ runner.os }}-
+    - if: steps.scripts.outputs.run == 'true'
+      run: pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
+    - if: steps.scripts.outputs.run == 'true'
+      run: pnpm check
+  fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - run: git config --global user.email t@t && git config --global user.name t &&
+        node --version && yq -r '.jobs.check.steps[] | select(.id == "scripts") |
+        .run' .github/workflows/check.yml > find-check.sh && bash .github/tmp-test/fixtures.sh
+        | tee out.txt && ! grep -q MISMATCH out.txt
