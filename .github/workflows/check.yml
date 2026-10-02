@@ -1,7 +1,9 @@
 name: Check
 
 # Required on every pull request in the organization through the "Merge policy" ruleset.
-# Runs the repository's own `check` script. Repositories without one pass with a notice.
+# Runs the repository's own `check` script. A pull request fails when it removes package.json,
+# pnpm-lock.yaml, or the `check` script from a base branch that has all three. Repositories
+# that are not pnpm projects with a check script on the base branch pass with a notice.
 
 on:
   pull_request:
@@ -26,14 +28,40 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Also fetches the parents of the pull request's merge commit, so the next step can read the base branch.
+          fetch-depth: 2
 
+      # The base branch decides whether a repository must run its check, because a pull
+      # request cannot change it. Once the base branch has package.json, pnpm-lock.yaml,
+      # and a `check` script, a pull request that removes any of them fails.
       - name: Find the check script
         id: scripts
         run: |
-          if [ -f package.json ] && [ -f pnpm-lock.yaml ] && node -e "process.exit(require('./package.json').scripts?.check ? 0 : 1)"; then
+          # Prints what a commit lacks to be a pnpm project with a check script.
+          missing() {
+            git cat-file -e "$1:package.json" 2>/dev/null || echo "package.json"
+            git cat-file -e "$1:pnpm-lock.yaml" 2>/dev/null || echo "pnpm-lock.yaml"
+            git show "$1:package.json" 2>/dev/null |
+              node -e 'process.exit(JSON.parse(require("fs").readFileSync(0, "utf8")).scripts?.check ? 0 : 1)' 2>/dev/null ||
+              echo "a check script in package.json"
+          }
+
+          # A pull request is checked out as a merge commit: the base branch, then the pull request.
+          if ! git rev-parse --verify --quiet HEAD^2 >/dev/null; then
+            echo "::error::Expected a pull request merge commit with the base branch as its first parent."
+            exit 1
+          fi
+
+          head_missing=$(missing HEAD)
+          base_missing=$(missing HEAD^1)
+
+          if [ -z "$head_missing" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$base_missing" ]; then
+            echo "::error::$GITHUB_BASE_REF is a pnpm project with a check script, but this pull request removes: $(echo "$head_missing" | paste -sd, - | sed 's/,/, /g'). Restore it so the check can run."
+            exit 1
           else
-            echo "No pnpm project with a check script. Nothing to run."
+            echo "No pnpm project with a check script on $GITHUB_BASE_REF or in this pull request. Nothing to run."
           fi
 
       - if: steps.scripts.outputs.run == 'true'
