@@ -2,7 +2,7 @@
 # Usage per scenario: base files spec, PR action. Runs the extracted step as GitHub would (bash -e).
 set -u
 SCRIPT=$PWD/find-check.sh
-root=$(mktemp -d /tmp/sec-report/work/fx.XXXX)
+root=$(mktemp -d)
 PKG_CHECK='{"name":"x","scripts":{"check":"prettier --check ."}}'
 PKG_NOCHECK='{"name":"x","scripts":{"build":"astro build"}}'
 scenario() {
