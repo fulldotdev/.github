@@ -18,8 +18,12 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Nested pnpm installs in a check script get the same protection as the install below.
+    env:
+      pnpm_config_ignore_scripts: "true"
+      pnpm_config_ignore_pnpmfile: "true"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -33,7 +37,7 @@ jobs:
           fi
 
       - if: steps.scripts.outputs.run == 'true'
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
 
@@ -41,16 +45,21 @@ jobs:
       - if: steps.scripts.outputs.run == 'true'
         run: corepack enable
 
-      # Later pushes to the same pull request skip the install while dependencies are unchanged.
+      # Caches downloaded packages only. The install below always runs, so every run
+      # checks the lockfile against the repository's pnpm settings and the registry.
       - if: steps.scripts.outputs.run == 'true'
-        id: modules
-        uses: actions/cache@v6
-        with:
-          path: node_modules
-          key: modules-${{ runner.os }}-node24-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', '**/package.json') }}
+        id: store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
-      - if: steps.scripts.outputs.run == 'true' && steps.modules.outputs.cache-hit != 'true'
-        run: pnpm install --frozen-lockfile --ignore-scripts
+      - if: steps.scripts.outputs.run == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
+      - if: steps.scripts.outputs.run == 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
 
       - if: steps.scripts.outputs.run == 'true'
         run: pnpm check
