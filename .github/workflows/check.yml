@@ -1,0 +1,47 @@
+name: Check
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        type: string
+        default: vp run check
+      install:
+        type: boolean
+        default: true
+      node-version-file:
+        type: string
+        default: .node-version
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      pnpm_config_ignore_scripts: "true"
+      pnpm_config_ignore_pnpmfile: "true"
+    steps:
+      - name: Checkout PR merge result
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Vite+ and install dependencies
+        if: ${{ inputs.install }}
+        uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
+        with:
+          version: "1.1.0"
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: true
+          run-install: |
+            args:
+              - --frozen-lockfile
+              - --ignore-scripts
+      - name: Check
+        env:
+          CHECK_COMMAND: ${{ inputs.command }}
+        run: bash -e -o pipefail -c "$CHECK_COMMAND"
