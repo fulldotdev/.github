@@ -2,6 +2,8 @@
 
 Organization-wide GitHub defaults and reusable workflows. Repository callers select their own check command; workflows here are not inherited automatically.
 
+Callers pin a full commit SHA from `main` after the shared workflow PR is merged.
+
 New projects take their callers from [astro-template](https://github.com/fulldotdev/astro-template) or [vite-template](https://github.com/fulldotdev/vite-template).
 
 - **Finalize (Prepare)** leaves a complete draft PR. Previews build; full checks wait for Ready.
