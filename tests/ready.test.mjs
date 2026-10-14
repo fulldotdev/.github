@@ -4,7 +4,7 @@ import test from 'node:test';
 
 const source = readFileSync(new URL('../.github/workflows/ready.yml', import.meta.url), 'utf8')
   .split('          script: |\n')[1].split('\n').map(line => line.slice(12)).join('\n');
-const execute = new (Object.getPrototypeOf(async function () {}).constructor)('github', 'context', 'core', 'process', source);
+const execute = new (Object.getPrototypeOf(async function () {}).constructor)('github', 'context', 'core', 'process', 'fetch', source);
 
 async function scenario(options = {}) {
   const pull = {number: 1, node_id: 'PR1', state: 'open', draft: false, head: {sha: 'head'},
@@ -36,7 +36,9 @@ async function scenario(options = {}) {
     graphql: async (_, args) => merges.push(args),
   };
   await execute(github, {repo: {owner: 'o', repo: 'r'}, payload: options.event ?? {pull_request: {number: 1}}},
-    {info: () => {}, error: message => errors.push(message), setFailed: message => errors.push(message)}, {env: {CHECK_NAME: 'Check / Check', NETLIFY_CHECKS: JSON.stringify(options.netlify ?? [])}});
+    {info: () => {}, error: message => errors.push(message), setFailed: message => errors.push(message)}, {env: {CHECK_NAME: 'Check / Check', NETLIFY_CHECKS: JSON.stringify(options.netlify ?? []),
+      GITHUB_API_URL: 'https://api.github.com', MERGE_TOKEN: options.mergeToken}},
+    options.fetch ?? (() => { throw new Error('Unexpected network request'); }));
   return {statuses, merges, errors};
 }
 
@@ -106,7 +108,7 @@ test('already-green PR merges immediately with the validated SHA', async () => {
   assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'squash'}]);
 });
 test('automatic merge is bound to the validated head', async () => {
-  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head'}]);
+  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head', method: 'SQUASH'}]);
 });
 test('every expected Netlify context must be centrally required', async () => {
   const result = await scenario({netlify: ['netlify/app/deploy-preview', 'netlify/site/deploy-preview'],
@@ -155,4 +157,33 @@ test('dismissal during notifier reads blocks both status and merge gates', async
     assert.equal(result.statuses.at(-1).state, 'pending');
     if (dismissAt === 3) assert.equal(result.statuses[0].state, 'pending');
   }
+});
+
+test('CloudCannon preview merges preserve ancestry', async () => {
+  const result = await scenario({pull: {mergeable_state: 'clean',
+    head: {sha: 'head', ref: 'preview', repo: {full_name: 'o/r'}},
+    base: {ref: 'main', repo: {full_name: 'o/r'}}}});
+  assert.equal(result.merges[0].merge_method, 'merge');
+});
+
+test('release app handles only the merge while Review remains an Actions status', async () => {
+  for (const mergeable_state of ['clean', 'blocked']) {
+    const requests = [];
+    const result = await scenario({mergeToken: 'synthetic-token', pull: {mergeable_state},
+      fetch: async (url, options) => { requests.push({url, options});
+        return {ok: true, status: 200, json: async () => ({merged: true})}; }});
+    assert.equal(result.statuses[0].state, 'success');
+    assert.equal(result.merges.length, 0);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].options.headers.Authorization, 'Bearer synthetic-token');
+    const body = JSON.parse(requests[0].options.body);
+    if (mergeable_state === 'clean') assert.deepEqual(body, {sha: 'head', merge_method: 'squash'});
+    else assert.deepEqual(body.variables, {id: 'PR1', sha: 'head', method: 'SQUASH'});
+  }
+});
+test('release app rejection is reported without treating the PR as merged', async () => {
+  const result = await scenario({mergeToken: 'synthetic-token', pull: {mergeable_state: 'clean'},
+    fetch: async () => ({ok: false, status: 409, json: async () => ({message: 'Head changed'})})});
+  assert.equal(result.merges.length, 0);
+  assert.match(result.errors[0], /Merge request failed \(409\)/);
 });
