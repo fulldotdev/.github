@@ -1,5 +1,5 @@
 # fulldotdev/.github
 
-Organization-wide GitHub configuration.
+Organization-wide GitHub defaults. CI workflows belong to each repository; workflows here are not inherited automatically.
 
-`.github/workflows/check.yml` is required on every pull request through the organization "Merge policy" ruleset. It installs with pnpm and runs the repository's `check` script. A pull request fails when the base branch has `package.json`, `pnpm-lock.yaml`, and a `check` script and the pull request removes any of them. A repository whose base branch is not a pnpm project with a `check` script passes with a notice. Nothing needs to be added to a repository.
+New projects take their CI from [astro-template](https://github.com/fulldotdev/astro-template) or [vite-template](https://github.com/fulldotdev/vite-template). [fulldev](https://github.com/fulldotdev/fulldev) owns the monorepo workflows.
