@@ -33,7 +33,14 @@ async function scenario(options = {}) {
     request: async () => ({data: [{type: 'required_status_checks', parameters: {
       required_status_checks: (options.required ?? ['Check / Check', 'Review']).map(context => ({context})),
     }}]}),
-    graphql: async (_, args) => merges.push(args),
+    graphql: async (query, args) => {
+      // Octokit reserves request options instead of treating them as GraphQL variables.
+      for (const reserved of ['method', 'url', 'baseUrl', 'headers', 'request']) {
+        assert.equal(Object.hasOwn(args, reserved), false, `Reserved GraphQL variable: ${reserved}`);
+      }
+      assert.match(query, /mergeMethod: \$mergeMethod/);
+      merges.push(args);
+    },
   };
   await execute(github, {repo: {owner: 'o', repo: 'r'}, payload: options.event ?? {pull_request: {number: 1}}},
     {info: () => {}, error: message => errors.push(message), setFailed: message => errors.push(message)}, {env: {CHECK_NAME: 'Check / Check', NETLIFY_CHECKS: JSON.stringify(options.netlify ?? []),
@@ -108,7 +115,7 @@ test('already-green PR merges immediately with the validated SHA', async () => {
   assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'squash'}]);
 });
 test('automatic merge is bound to the validated head', async () => {
-  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head', method: 'SQUASH'}]);
+  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head', mergeMethod: 'SQUASH'}]);
 });
 test('every expected Netlify context must be centrally required', async () => {
   const result = await scenario({netlify: ['netlify/app/deploy-preview', 'netlify/site/deploy-preview'],
@@ -178,7 +185,7 @@ test('release app handles only the merge while Review remains an Actions status'
     assert.equal(requests[0].options.headers.Authorization, 'Bearer synthetic-token');
     const body = JSON.parse(requests[0].options.body);
     if (mergeable_state === 'clean') assert.deepEqual(body, {sha: 'head', merge_method: 'squash'});
-    else assert.deepEqual(body.variables, {id: 'PR1', sha: 'head', method: 'SQUASH'});
+    else assert.deepEqual(body.variables, {id: 'PR1', sha: 'head', mergeMethod: 'SQUASH'});
   }
 });
 test('release app rejection is reported without treating the PR as merged', async () => {

@@ -142,12 +142,12 @@ jobs:
                 return;
               }
               if (final.auto_merge) return core.info('Auto-merge is already enabled.');
-              const mutation = `mutation($id: ID!, $sha: GitObjectID!, $method: PullRequestMergeMethod!) {
-                enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $sha, mergeMethod: $method}) {
+              const mutation = `mutation($id: ID!, $sha: GitObjectID!, $mergeMethod: PullRequestMergeMethod!) {
+                enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $sha, mergeMethod: $mergeMethod}) {
                   pullRequest { number }
                 }
               }`;
-              const variables = {id: final.node_id, sha, method: method.toUpperCase()};
+              const variables = {id: final.node_id, sha, mergeMethod: method.toUpperCase()};
               if (process.env.MERGE_TOKEN) await mergeRequest('/graphql', 'POST', {query: mutation, variables});
               else await github.graphql(mutation, variables);
             }
