@@ -1,0 +1,158 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+const source = readFileSync(new URL('../.github/workflows/ready.yml', import.meta.url), 'utf8')
+  .split('          script: |\n')[1].split('\n').map(line => line.slice(12)).join('\n');
+const execute = new (Object.getPrototypeOf(async function () {}).constructor)('github', 'context', 'core', 'process', source);
+
+async function scenario(options = {}) {
+  const pull = {number: 1, node_id: 'PR1', state: 'open', draft: false, head: {sha: 'head'},
+    base: {ref: 'main'}, labels: options.selected ? [{name: 'review-ready'}] : [], html_url: 'https://github.com/o/r/pull/1',
+    ...options.pull};
+  const pulls = options.pulls ?? [pull];
+  const errors = [];
+  const statuses = [];
+  const merges = [];
+  let reads = 0;
+  const github = {
+    rest: {
+      pulls: {get: async ({pull_number}) => ({data: ++reads >= 2 && options.changed ? {...pull, head: {sha: 'new'}} : pulls.find(candidate => candidate.number === pull_number)}),
+        listReviews: 'reviews', list: 'pulls', merge: async args => { if (options.rejectPull === args.pull_number) throw Object.assign(new Error('Head changed'), {status: 409}); merges.push(args); }},
+      repos: {get: async () => ({data: {default_branch: 'main', allow_auto_merge: options.autoMerge !== false}}),
+        getContent: async ({ref}) => {
+          options.notifierRead?.();
+          if (options.missingNotifier && ref.startsWith('refs/pull/')) throw Object.assign(new Error('Not found'), {status: 404});
+          return {data: {type: 'file', sha: options.changedNotifier && ref.startsWith('refs/pull/') ? 'modified' : 'trusted'}};
+        },
+        createCommitStatus: async status => statuses.push(status)},
+      checks: {listForRef: 'checks'},
+    },
+    paginate: async endpoint => endpoint === 'reviews' ? (options.reviewRead ? options.reviewRead() : options.reviews ?? [])
+      : endpoint === 'pulls' ? pulls : (options.checks ?? [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'success'}]),
+    request: async () => ({data: [{type: 'required_status_checks', parameters: {
+      required_status_checks: (options.required ?? ['Check / Check', 'Review']).map(context => ({context})),
+    }}]}),
+    graphql: async (_, args) => merges.push(args),
+  };
+  await execute(github, {repo: {owner: 'o', repo: 'r'}, payload: options.event ?? {pull_request: {number: 1}}},
+    {info: () => {}, error: message => errors.push(message), setFailed: message => errors.push(message)}, {env: {CHECK_NAME: 'Check / Check', NETLIFY_CHECKS: JSON.stringify(options.netlify ?? [])}});
+  return {statuses, merges, errors};
+}
+
+const approval = {id: 1, user: {type: 'Bot', login: 'coderabbitai[bot]'}, state: 'APPROVED', commit_id: 'head'};
+
+test('Ready with real checks and no selected review enables auto-merge', async () => {
+  const result = await scenario();
+  assert.equal(result.statuses[0].state, 'success');
+  assert.equal(result.merges.length, 1);
+});
+test('draft remains pending and cannot auto-merge', async () => {
+  const result = await scenario({pull: {draft: true}});
+  assert.equal(result.statuses[0].state, 'pending');
+  assert.equal(result.merges.length, 0);
+});
+test('selected but missing, skipped or rate-limited review stays pending', async () => {
+  const result = await scenario({selected: true});
+  assert.equal(result.statuses[0].state, 'pending');
+  assert.equal(result.merges.length, 0);
+});
+test('selected approval must be from CodeRabbit at the current revision', async () => {
+  for (const review of [{...approval, commit_id: 'old'}, {...approval, user: {type: 'User', login: 'coderabbitai[bot]'}},
+    {...approval, user: {type: 'Bot', login: 'another[bot]'}}]) {
+    const result = await scenario({selected: true, reviews: [review]});
+    assert.equal(result.statuses[0].state, 'pending');
+    assert.equal(result.merges.length, 0);
+  }
+  assert.equal((await scenario({selected: true, reviews: [approval]})).merges.length, 1);
+});
+test('requested changes or dismissed approval supersede an earlier approval', async () => {
+  for (const state of ['CHANGES_REQUESTED', 'DISMISSED']) {
+    const result = await scenario({selected: true, reviews: [approval, {...approval, id: 2, state}]});
+    assert.equal(result.statuses[0].state, 'pending');
+    assert.equal(result.merges.length, 0);
+  }
+});
+test('skipped, failed or absent static checks never authorize publication', async () => {
+  for (const checks of [[], [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'skipped'}],
+    [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'failure'}]]) {
+    assert.equal((await scenario({checks})).merges.length, 0);
+  }
+});
+test('a newer pending Check supersedes an older successful one', async () => {
+  const checks = [
+    {id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'success'},
+    {id: 2, name: 'Check / Check', app: {id: 15368}, conclusion: null},
+  ];
+  assert.equal((await scenario({checks})).merges.length, 0);
+});
+test('missing central requirements or disabled repository auto-merge prevents rollout races', async () => {
+  assert.equal((await scenario({required: ['Check / Check']})).merges.length, 0);
+  assert.equal((await scenario({autoMerge: false})).merges.length, 0);
+});
+test('changed revision, closed PR or another target does not publish', async () => {
+  for (const options of [{changed: true}, {pull: {state: 'closed'}}, {pull: {base: {ref: 'preview'}}}]) {
+    const result = await scenario(options);
+    assert.equal(result.statuses.length, 0);
+    assert.equal(result.merges.length, 0);
+  }
+});
+test('successful Check workflow completion resumes the associated PR', async () => {
+  assert.equal((await scenario({event: {workflow_run: {pull_requests: [{number: 1}]}}})).merges.length, 1);
+  assert.equal((await scenario({event: {workflow_run: {pull_requests: []}}})).merges.length, 1);
+});
+test('already-green PR merges immediately with the validated SHA', async () => {
+  const result = await scenario({pull: {mergeable_state: 'clean'}});
+  assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'squash'}]);
+});
+test('automatic merge is bound to the validated head', async () => {
+  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head'}]);
+});
+test('every expected Netlify context must be centrally required', async () => {
+  const result = await scenario({netlify: ['netlify/app/deploy-preview', 'netlify/site/deploy-preview'],
+    required: ['Check / Check', 'Review', 'netlify/app/deploy-preview']});
+  assert.equal(result.merges.length, 0);
+});
+test('dismissal during processing never writes stale approval', async () => {
+  let reads = 0;
+  const result = await scenario({selected: true,
+    reviewRead: () => ++reads === 1 ? [approval] : [{...approval, state: 'DISMISSED'}]});
+  assert.equal(result.statuses[0].state, 'pending');
+  assert.equal(result.merges.length, 0);
+});
+
+test('selected review cannot remove or modify the trusted review notifier', async () => {
+  for (const options of [{changedNotifier: true}, {missingNotifier: true}]) {
+    const result = await scenario({...options, selected: true, reviews: [approval]});
+    assert.equal(result.statuses[0].state, 'pending');
+    assert.equal(result.merges.length, 0);
+  }
+});
+test('every event reconciles other open PRs, even when concurrency coalesces events', async () => {
+  const pulls = [1, 2].map(number => ({number, node_id: `PR${number}`, state: 'open', draft: false,
+    head: {sha: `head${number}`}, base: {ref: 'main'}, labels: [], html_url: `https://github.com/o/r/pull/${number}`}));
+  const result = await scenario({pulls, event: {pull_request: {number: 2}}});
+  assert.deepEqual(result.merges.map(merge => merge.id), ['PR1', 'PR2']);
+});
+test('a rejected merge does not stop reconciliation of later PRs', async () => {
+  const pulls = [1, 2].map(number => ({number, node_id: `PR${number}`, state: 'open', draft: false,
+    head: {sha: `head${number}`}, base: {ref: 'main'}, labels: [], mergeable_state: 'clean',
+    html_url: `https://github.com/o/r/pull/${number}`}));
+  const result = await scenario({pulls, rejectPull: 1});
+  assert.deepEqual(result.merges.map(merge => merge.pull_number), [2]);
+  assert.match(result.errors[0], /PR #1: Head changed/);
+  assert.equal(result.errors.length, 2);
+});
+
+test('dismissal during notifier reads blocks both status and merge gates', async () => {
+  for (const dismissAt of [3, 5]) {
+    let reads = 0;
+    let dismissed = false;
+    const result = await scenario({selected: true, pull: {mergeable_state: 'clean'},
+      notifierRead: () => { if (++reads === dismissAt) dismissed = true; },
+      reviewRead: () => [{...approval, state: dismissed ? 'DISMISSED' : 'APPROVED'}]});
+    assert.equal(result.merges.length, 0);
+    assert.equal(result.statuses.at(-1).state, 'pending');
+    if (dismissAt === 3) assert.equal(result.statuses[0].state, 'pending');
+  }
+});

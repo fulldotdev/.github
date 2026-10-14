@@ -1,0 +1,125 @@
+name: Ready
+
+on:
+  workflow_call:
+    inputs:
+      netlify-checks:
+        type: string
+        default: "[]"
+      check-name:
+        type: string
+        default: Check / Check
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+  checks: read
+
+concurrency:
+  group: ready-policy-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  ready:
+    name: Ready
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      # Only GitHub metadata is read. Never check out or execute PR code here.
+      - name: Require selected review and enable auto-merge
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          NETLIFY_CHECKS: ${{ inputs.netlify-checks }}
+          CHECK_NAME: ${{ inputs.check-name }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const repository = (await github.rest.repos.get({owner, repo})).data;
+            const candidates = await github.paginate(github.rest.pulls.list, {owner, repo, state: 'open',
+                  base: repository.default_branch, per_page: 100});
+            async function processPull(number) {
+              const getPull = async () => (await github.rest.pulls.get({owner, repo, pull_number: number})).data;
+              const pull = await getPull();
+              if (pull.state !== 'open' || pull.base.ref !== repository.default_branch) return;
+              const sha = pull.head.sha;
+              const selected = pull.labels.some(label => label.name === 'review-ready');
+              async function hasApproval() {
+                if (!selected) return true;
+                const reviews = await github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number: number, per_page: 100});
+                const decisions = reviews.filter(review => review.user?.type === 'Bot'
+                  && review.user.login === 'coderabbitai[bot]'
+                  && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state));
+                const latest = decisions.sort((a, b) => b.id - a.id)[0];
+                return latest?.state === 'APPROVED' && latest.commit_id === sha;
+              }
+              async function hasTrustedNotifier() {
+                if (!selected) return true;
+                try {
+                  const path = '.github/workflows/review-event.yml';
+                  const trusted = (await github.rest.repos.getContent({owner, repo, path,
+                    ref: repository.default_branch})).data;
+                  const merged = (await github.rest.repos.getContent({owner, repo, path,
+                    ref: `refs/pull/${number}/merge`})).data;
+                  return trusted.type === 'file' && merged.type === 'file' && trusted.sha === merged.sha;
+                } catch (error) {
+                  if (error.status === 404) return false;
+                  throw error;
+                }
+              }
+              const approved = await hasTrustedNotifier() && await hasApproval();
+              const current = await getPull();
+              if (current.base.ref !== pull.base.ref || current.head.sha !== sha || current.draft !== pull.draft
+                || current.labels.some(label => label.name === 'review-ready') !== selected) return;
+              const reviewPassed = !pull.draft && approved && await hasTrustedNotifier() && await hasApproval();
+              await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
+                state: reviewPassed ? 'success' : 'pending',
+                description: pull.draft ? 'Draft: publication is not authorized.'
+                  : approved ? (selected ? 'CodeRabbit approved this revision.' : 'No CodeRabbit review selected.')
+                  : 'Waiting for CodeRabbit approval of this revision.',
+                target_url: pull.html_url});
+              if (!reviewPassed) return;
+              // A skipped draft Check must never authorize automatic publication.
+              const checks = await github.paginate(github.rest.checks.listForRef, {owner, repo, ref: sha, per_page: 100});
+              const check = checks.filter(run => run.name === process.env.CHECK_NAME && run.app?.id === 15368)
+                .sort((a, b) => b.id - a.id)[0];
+              if (check?.conclusion !== 'success') return core.info('Waiting for a successful Ready Check.');
+              // Rollout must install central requirements before enabling auto-merge.
+              const {data: rules} = await github.request('GET /repos/{owner}/{repo}/rules/branches/{branch}',
+                {owner, repo, branch: pull.base.ref});
+              const required = rules.filter(rule => rule.type === 'required_status_checks')
+                .flatMap(rule => rule.parameters.required_status_checks.map(status => status.context));
+              const expected = [process.env.CHECK_NAME, 'Review', ...JSON.parse(process.env.NETLIFY_CHECKS)];
+              if (!expected.every(name => required.includes(name))) {
+                return core.info('The complete central Check, Review and Netlify requirements are not active yet.');
+              }
+              if (!repository.allow_auto_merge) return core.info('Repository auto-merge is not enabled yet.');
+              const final = await getPull();
+              if (final.state !== 'open' || final.draft || final.base.ref !== pull.base.ref || final.head.sha !== sha
+                || final.labels.some(label => label.name === 'review-ready') !== selected) return;
+              if (selected && (!await hasTrustedNotifier() || !await hasApproval())) {
+                await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
+                  state: 'pending', description: 'CodeRabbit approval changed; waiting for review.', target_url: pull.html_url});
+                return;
+              }
+              if (final.mergeable_state === 'clean') {
+                await github.rest.pulls.merge({owner, repo, pull_number: number, sha, merge_method: 'squash'});
+                return;
+              }
+              if (final.auto_merge) return core.info('Auto-merge is already enabled.');
+              await github.graphql(`mutation($id: ID!, $sha: GitObjectID!) {
+                enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $sha, mergeMethod: SQUASH}) {
+                  pullRequest { number }
+                }
+              }`, {id: final.node_id, sha});
+            }
+            let failed = false;
+            for (const pull of candidates) {
+              try {
+                await processPull(pull.number);
+              } catch (error) {
+                failed = true;
+                core.error(`PR #${pull.number}: ${error.message}`);
+              }
+            }
+            if (failed) core.setFailed('Some PRs could not be reconciled; see their errors above.');
