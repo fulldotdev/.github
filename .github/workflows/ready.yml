@@ -79,7 +79,10 @@ jobs:
                 const decisions = reviews.filter(review => review.user?.type === 'Bot'
                   && review.user.login === 'coderabbitai[bot]'
                   && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state));
-                const latest = decisions.sort((a, b) => b.id - a.id)[0];
+                const latest = decisions.sort((a, b) => {
+                  const runId = check => Number(check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1] ?? check.id);
+                  return runId(b) - runId(a) || b.id - a.id;
+                })[0];
                 return latest?.state === 'APPROVED' && latest.commit_id === sha;
               }
               async function hasTrustedNotifier() {
@@ -108,10 +111,14 @@ jobs:
                   : 'Waiting for CodeRabbit approval of this revision.',
                 target_url: pull.html_url});
               if (!reviewPassed) return;
+              // Workflow events can create jobs out of order. Compare the originating run first.
               // A skipped draft Check must never authorize automatic publication.
               const checks = await github.paginate(github.rest.checks.listForRef, {owner, repo, ref: sha, per_page: 100});
               const check = checks.filter(run => run.name === process.env.CHECK_NAME && run.app?.id === 15368)
-                .sort((a, b) => b.id - a.id)[0];
+                .sort((a, b) => {
+                  const runId = check => Number(check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1] ?? check.id);
+                  return runId(b) - runId(a) || b.id - a.id;
+                })[0];
               if (check?.conclusion !== 'success') return core.info('Waiting for a successful Ready Check.');
               // Rollout must install central requirements before enabling auto-merge.
               const {data: rules} = await github.request('GET /repos/{owner}/{repo}/rules/branches/{branch}',
