@@ -15,20 +15,21 @@ async function scenario(options = {}) {
   let reads = 0;
   const github = {
     rest: {
-      pulls: {get: async () => ({data: ++reads >= 2 && options.changed ? {...pull, head: {sha: 'new'}} : pull}), listReviews: 'reviews'},
+      pulls: {get: async () => ({data: ++reads >= 2 && options.changed ? {...pull, head: {sha: 'new'}} : pull}),
+        listReviews: 'reviews', list: 'pulls', merge: async args => merges.push(args)},
       repos: {get: async () => ({data: {default_branch: 'main', allow_auto_merge: options.autoMerge !== false}}),
         createCommitStatus: async status => statuses.push(status)},
       checks: {listForRef: 'checks'},
     },
-    paginate: async endpoint => endpoint === 'reviews' ? (options.reviews ?? [])
-      : (options.checks ?? [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'success'}]),
+    paginate: async endpoint => endpoint === 'reviews' ? (options.reviewRead ? options.reviewRead() : options.reviews ?? [])
+      : endpoint === 'pulls' ? [pull] : (options.checks ?? [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'success'}]),
     request: async () => ({data: [{type: 'required_status_checks', parameters: {
       required_status_checks: (options.required ?? ['Check / Check', 'Review']).map(context => ({context})),
     }}]}),
     graphql: async (_, args) => merges.push(args),
   };
   await execute(github, {repo: {owner: 'o', repo: 'r'}, payload: options.event ?? {pull_request: {number: 1}}},
-    {info: () => {}}, {env: {CHECK_NAME: 'Check / Check'}});
+    {info: () => {}}, {env: {CHECK_NAME: 'Check / Check', NETLIFY_CHECKS: JSON.stringify(options.netlify ?? [])}});
   return {statuses, merges};
 }
 
@@ -91,5 +92,24 @@ test('changed revision, closed PR or another target does not publish', async () 
 });
 test('successful Check workflow completion resumes the associated PR', async () => {
   assert.equal((await scenario({event: {workflow_run: {pull_requests: [{number: 1}]}}})).merges.length, 1);
-  assert.equal((await scenario({event: {workflow_run: {pull_requests: []}}})).merges.length, 0);
+  assert.equal((await scenario({event: {workflow_run: {pull_requests: []}}})).merges.length, 1);
+});
+test('already-green PR merges immediately with the validated SHA', async () => {
+  const result = await scenario({pull: {mergeable_state: 'clean'}});
+  assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'squash'}]);
+});
+test('automatic merge is bound to the validated head', async () => {
+  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head'}]);
+});
+test('every expected Netlify context must be centrally required', async () => {
+  const result = await scenario({netlify: ['netlify/app/deploy-preview', 'netlify/site/deploy-preview'],
+    required: ['Check / Check', 'Review', 'netlify/app/deploy-preview']});
+  assert.equal(result.merges.length, 0);
+});
+test('dismissal during processing never writes stale approval', async () => {
+  let reads = 0;
+  const result = await scenario({selected: true,
+    reviewRead: () => ++reads === 1 ? [approval] : [{...approval, state: 'DISMISSED'}]});
+  assert.equal(result.statuses[0].state, 'pending');
+  assert.equal(result.merges.length, 0);
 });

@@ -3,6 +3,9 @@ name: Ready
 on:
   workflow_call:
     inputs:
+      netlify-checks:
+        type: string
+        default: "[]"
       check-name:
         type: string
         default: Check / Check
@@ -12,6 +15,10 @@ permissions:
   pull-requests: write
   statuses: write
   checks: read
+
+concurrency:
+  group: ready-policy-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   ready:
@@ -23,39 +30,42 @@ jobs:
       - name: Require selected review and enable auto-merge
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
+          NETLIFY_CHECKS: ${{ inputs.netlify-checks }}
           CHECK_NAME: ${{ inputs.check-name }}
         with:
           script: |
             const {owner, repo} = context.repo;
-            const number = context.payload.pull_request?.number
-              ?? context.payload.workflow_run?.pull_requests?.[0]?.number;
-            if (!number) return core.info('No associated pull request.');
+            const repository = (await github.rest.repos.get({owner, repo})).data;
+            const candidates = context.payload.pull_request ? [context.payload.pull_request]
+              : await github.paginate(github.rest.pulls.list, {owner, repo, state: 'open',
+                  base: repository.default_branch, per_page: 100});
+            async function processPull(number) {
             const getPull = async () => (await github.rest.pulls.get({owner, repo, pull_number: number})).data;
             const pull = await getPull();
-            const repository = (await github.rest.repos.get({owner, repo})).data;
             if (pull.state !== 'open' || pull.base.ref !== repository.default_branch) return;
             const sha = pull.head.sha;
             const selected = pull.labels.some(label => label.name === 'review-ready');
-            let approved = !selected;
-            if (selected) {
+            async function hasApproval() {
+              if (!selected) return true;
               const reviews = await github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number: number, per_page: 100});
               const decisions = reviews.filter(review => review.user?.type === 'Bot'
                 && review.user.login === 'coderabbitai[bot]'
                 && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state));
               const latest = decisions.sort((a, b) => b.id - a.id)[0];
-              approved = latest?.state === 'APPROVED' && latest.commit_id === sha;
+              return latest?.state === 'APPROVED' && latest.commit_id === sha;
             }
+            const approved = await hasApproval();
             const current = await getPull();
-            if (current.head.sha !== sha || current.draft !== pull.draft
+            if (current.base.ref !== pull.base.ref || current.head.sha !== sha || current.draft !== pull.draft
               || current.labels.some(label => label.name === 'review-ready') !== selected) return;
-            const reviewPassed = !pull.draft && approved;
+            const reviewPassed = !pull.draft && approved && await hasApproval();
             await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
               state: reviewPassed ? 'success' : 'pending',
               description: pull.draft ? 'Draft: publication is not authorized.'
                 : approved ? (selected ? 'CodeRabbit approved this revision.' : 'No CodeRabbit review selected.')
                 : 'Waiting for CodeRabbit approval of this revision.',
               target_url: pull.html_url});
-            if (pull.draft || !approved) return;
+            if (!reviewPassed) return;
             // A skipped draft Check must never authorize automatic publication.
             const checks = await github.paginate(github.rest.checks.listForRef, {owner, repo, ref: sha, per_page: 100});
             const check = checks.filter(run => run.name === process.env.CHECK_NAME && run.app?.id === 15368)
@@ -66,16 +76,28 @@ jobs:
               {owner, repo, branch: pull.base.ref});
             const required = rules.filter(rule => rule.type === 'required_status_checks')
               .flatMap(rule => rule.parameters.required_status_checks.map(status => status.context));
-            if (!required.includes(process.env.CHECK_NAME) || !required.includes('Review')) {
-              return core.info('Central Check and Review requirements are not active yet.');
+            const expected = [process.env.CHECK_NAME, 'Review', ...JSON.parse(process.env.NETLIFY_CHECKS)];
+            if (!expected.every(name => required.includes(name))) {
+              return core.info('The complete central Check, Review and Netlify requirements are not active yet.');
             }
             if (!repository.allow_auto_merge) return core.info('Repository auto-merge is not enabled yet.');
             const final = await getPull();
-            if (final.state !== 'open' || final.draft || final.head.sha !== sha
+            if (final.state !== 'open' || final.draft || final.base.ref !== pull.base.ref || final.head.sha !== sha
               || final.labels.some(label => label.name === 'review-ready') !== selected) return;
+            if (selected && !await hasApproval()) {
+              await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
+                state: 'pending', description: 'CodeRabbit approval changed; waiting for review.', target_url: pull.html_url});
+              return;
+            }
+            if (final.mergeable_state === 'clean') {
+              await github.rest.pulls.merge({owner, repo, pull_number: number, sha, merge_method: 'squash'});
+              return;
+            }
             if (final.auto_merge) return core.info('Auto-merge is already enabled.');
-            await github.graphql(`mutation($id: ID!) {
-              enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) {
+            await github.graphql(`mutation($id: ID!, $sha: GitObjectID!) {
+              enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $sha, mergeMethod: SQUASH}) {
                 pullRequest { number }
               }
-            }`, {id: final.node_id});
+            }`, {id: final.node_id, sha});
+            }
+            for (const pull of candidates) await processPull(pull.number);
