@@ -29,7 +29,8 @@ async function scenario(options = {}) {
       checks: {listForRef: 'checks'},
     },
     paginate: async endpoint => endpoint === 'reviews' ? (options.reviewRead ? options.reviewRead() : options.reviews ?? [])
-      : endpoint === 'pulls' ? pulls : (options.checks ?? [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'success'}]),
+      : endpoint === 'pulls' ? pulls : (options.checks ?? [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'success'}]).map(check =>
+        Object.hasOwn(check, 'details_url') ? check : {...check, details_url: `https://github.com/o/r/actions/runs/${check.id}/job/${check.id}`}),
     request: async () => ({data: [{type: 'required_status_checks', parameters: {
       required_status_checks: (options.required ?? ['Check / Check', 'Review']).map(context => ({context})),
     }}]}),
@@ -193,4 +194,43 @@ test('release app rejection is reported without treating the PR as merged', asyn
     fetch: async () => ({ok: false, status: 409, json: async () => ({message: 'Head changed'})})});
   assert.equal(result.merges.length, 0);
   assert.match(result.errors[0], /Merge request failed \(409\)/);
+});
+
+
+test('delayed draft job does not supersede the newer Ready workflow', async () => {
+  const checks = [
+    {id: 116021792205, name: 'Check / Check', app: {id: 15368}, conclusion: 'skipped',
+      details_url: 'https://github.com/o/r/actions/runs/38613265941/job/116021792205'},
+    {id: 116021772853, name: 'Check / Check', app: {id: 15368}, conclusion: 'success',
+      details_url: 'https://github.com/o/r/actions/runs/38613266353/job/116021772853'},
+  ];
+  assert.equal((await scenario({checks})).merges.length, 1);
+  for (const conclusion of [null, 'failure', 'skipped']) {
+    checks[1].conclusion = conclusion;
+    assert.equal((await scenario({checks})).merges.length, 0);
+  }
+});
+test('newer Ready workflow and latest attempt supersede old successful jobs', async () => {
+  for (const newerRun of [100, 101]) {
+    const checks = [
+      {id: 200, name: 'Check / Check', app: {id: 15368}, conclusion: 'success',
+        details_url: 'https://github.com/o/r/actions/runs/100/job/200'},
+      {id: newerRun === 100 ? 201 : 199, name: 'Check / Check', app: {id: 15368}, conclusion: 'failure',
+        details_url: `https://github.com/o/r/actions/runs/${newerRun}/job/new`},
+    ];
+    assert.equal((await scenario({checks})).merges.length, 0);
+  }
+});
+
+test('mixed or absent workflow metadata cannot authorize an old successful result', async () => {
+  for (const conclusion of ['failure', null, 'skipped', 'success']) {
+    const checks = [
+      {id: 116021792205, name: 'Check / Check', app: {id: 15368}, conclusion: 'success', details_url: null},
+      {id: 116021772853, name: 'Check / Check', app: {id: 15368}, conclusion,
+        details_url: 'https://github.com/o/r/actions/runs/38613266353/job/116021772853'},
+    ];
+    assert.equal((await scenario({checks})).merges.length, 0);
+  }
+  assert.equal((await scenario({checks: [{id: 1, name: 'Check / Check', app: {id: 15368},
+    conclusion: 'success', details_url: 'invalid'}]})).merges.length, 0);
 });
