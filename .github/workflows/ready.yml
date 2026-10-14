@@ -114,11 +114,10 @@ jobs:
               // Workflow events can create jobs out of order. Compare the originating run first.
               // A skipped draft Check must never authorize automatic publication.
               const checks = await github.paginate(github.rest.checks.listForRef, {owner, repo, ref: sha, per_page: 100});
-              const check = checks.filter(run => run.name === process.env.CHECK_NAME && run.app?.id === 15368)
-                .sort((a, b) => {
-                  const runId = check => Number(check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1] ?? check.id);
-                  return runId(b) - runId(a) || b.id - a.id;
-                })[0];
+              const candidates = checks.filter(run => run.name === process.env.CHECK_NAME && run.app?.id === 15368);
+              const runId = check => Number(check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1]);
+              if (candidates.some(run => !runId(run))) return core.info('Waiting for comparable Ready Check metadata.');
+              const check = candidates.sort((a, b) => runId(b) - runId(a) || b.id - a.id)[0];
               if (check?.conclusion !== 'success') return core.info('Waiting for a successful Ready Check.');
               // Rollout must install central requirements before enabling auto-merge.
               const {data: rules} = await github.request('GET /repos/{owner}/{repo}/rules/branches/{branch}',
