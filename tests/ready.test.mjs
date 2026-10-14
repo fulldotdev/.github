@@ -21,6 +21,7 @@ async function scenario(options = {}) {
         listReviews: 'reviews', list: 'pulls', merge: async args => { if (options.rejectPull === args.pull_number) throw Object.assign(new Error('Head changed'), {status: 409}); merges.push(args); }},
       repos: {get: async () => ({data: {default_branch: 'main', allow_auto_merge: options.autoMerge !== false}}),
         getContent: async ({ref}) => {
+          options.notifierRead?.();
           if (options.missingNotifier && ref.startsWith('refs/pull/')) throw Object.assign(new Error('Not found'), {status: 404});
           return {data: {type: 'file', sha: options.changedNotifier && ref.startsWith('refs/pull/') ? 'modified' : 'trusted'}};
         },
@@ -141,4 +142,17 @@ test('a rejected merge does not stop reconciliation of later PRs', async () => {
   assert.deepEqual(result.merges.map(merge => merge.pull_number), [2]);
   assert.match(result.errors[0], /PR #1: Head changed/);
   assert.equal(result.errors.length, 2);
+});
+
+test('dismissal during notifier reads blocks both status and merge gates', async () => {
+  for (const dismissAt of [3, 5]) {
+    let reads = 0;
+    let dismissed = false;
+    const result = await scenario({selected: true, pull: {mergeable_state: 'clean'},
+      notifierRead: () => { if (++reads === dismissAt) dismissed = true; },
+      reviewRead: () => [{...approval, state: dismissed ? 'DISMISSED' : 'APPROVED'}]});
+    assert.equal(result.merges.length, 0);
+    assert.equal(result.statuses.at(-1).state, 'pending');
+    if (dismissAt === 3) assert.equal(result.statuses[0].state, 'pending');
+  }
 });

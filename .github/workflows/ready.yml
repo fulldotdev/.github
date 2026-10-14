@@ -67,11 +67,11 @@ jobs:
                   throw error;
                 }
               }
-              const approved = await hasApproval() && await hasTrustedNotifier();
+              const approved = await hasTrustedNotifier() && await hasApproval();
               const current = await getPull();
               if (current.base.ref !== pull.base.ref || current.head.sha !== sha || current.draft !== pull.draft
                 || current.labels.some(label => label.name === 'review-ready') !== selected) return;
-              const reviewPassed = !pull.draft && approved && await hasApproval() && await hasTrustedNotifier();
+              const reviewPassed = !pull.draft && approved && await hasTrustedNotifier() && await hasApproval();
               await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
                 state: reviewPassed ? 'success' : 'pending',
                 description: pull.draft ? 'Draft: publication is not authorized.'
@@ -97,7 +97,7 @@ jobs:
               const final = await getPull();
               if (final.state !== 'open' || final.draft || final.base.ref !== pull.base.ref || final.head.sha !== sha
                 || final.labels.some(label => label.name === 'review-ready') !== selected) return;
-              if (selected && (!await hasApproval() || !await hasTrustedNotifier())) {
+              if (selected && (!await hasTrustedNotifier() || !await hasApproval())) {
                 await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
                   state: 'pending', description: 'CodeRabbit approval changed; waiting for review.', target_url: pull.html_url});
                 return;
