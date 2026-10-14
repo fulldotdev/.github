@@ -139,7 +139,8 @@ jobs:
               }
               const method = final.head.ref === 'preview' && final.head.repo?.full_name === final.base.repo?.full_name
                 ? 'merge' : 'squash';
-              if (final.mergeable_state === 'clean') {
+              // Unrequired failed jobs can make GitHub report unstable; required rules still enforce this merge.
+              if (['clean', 'unstable'].includes(final.mergeable_state)) {
                 if (process.env.MERGE_TOKEN) {
                   await mergeRequest(`/repos/${owner}/${repo}/pulls/${number}/merge`, 'PUT', {sha, merge_method: method});
                 } else {

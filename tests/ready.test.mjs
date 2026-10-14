@@ -118,6 +118,13 @@ test('already-green PR merges immediately with the validated SHA', async () => {
 test('automatic merge is bound to the validated head', async () => {
   assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head', mergeMethod: 'SQUASH'}]);
 });
+test('unrequired failures do not strand an otherwise eligible PR', async () => {
+  const result = await scenario({pull: {mergeable_state: 'unstable'}});
+  assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'squash'}]);
+  const denied = await scenario({pull: {mergeable_state: 'unstable'}, rejectPull: 1});
+  assert.equal(denied.merges.length, 0);
+  assert.match(denied.errors[0], /Head changed/);
+});
 test('every expected Netlify context must be centrally required', async () => {
   const result = await scenario({netlify: ['netlify/app/deploy-preview', 'netlify/site/deploy-preview'],
     required: ['Check / Check', 'Review', 'netlify/app/deploy-preview']});
@@ -175,7 +182,7 @@ test('CloudCannon preview merges preserve ancestry', async () => {
 });
 
 test('release app handles only the merge while Review remains an Actions status', async () => {
-  for (const mergeable_state of ['clean', 'blocked']) {
+  for (const mergeable_state of ['clean', 'unstable', 'blocked']) {
     const requests = [];
     const result = await scenario({mergeToken: 'synthetic-token', pull: {mergeable_state},
       fetch: async (url, options) => { requests.push({url, options});
@@ -185,7 +192,7 @@ test('release app handles only the merge while Review remains an Actions status'
     assert.equal(requests.length, 1);
     assert.equal(requests[0].options.headers.Authorization, 'Bearer synthetic-token');
     const body = JSON.parse(requests[0].options.body);
-    if (mergeable_state === 'clean') assert.deepEqual(body, {sha: 'head', merge_method: 'squash'});
+    if (mergeable_state !== 'blocked') assert.deepEqual(body, {sha: 'head', merge_method: 'squash'});
     else assert.deepEqual(body.variables, {id: 'PR1', sha: 'head', mergeMethod: 'SQUASH'});
   }
 });
