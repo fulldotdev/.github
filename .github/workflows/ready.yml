@@ -10,6 +10,13 @@ on:
         type: string
         default: Check / Check
 
+      merge-app-client-id:
+        type: string
+        default: ""
+    secrets:
+      merge-app-private-key:
+        required: false
+
 permissions:
   contents: write
   pull-requests: write
@@ -26,18 +33,40 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
+      - name: Create merge token for repositories with release workflows
+        if: ${{ inputs.merge-app-client-id != '' }}
+        id: merge-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.merge-app-client-id }}
+          private-key: ${{ secrets.merge-app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+      # Only the merge uses this token, so existing push-triggered releases still run.
       # Only GitHub metadata is read. Never check out or execute PR code here.
       - name: Require selected review and enable auto-merge
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           NETLIFY_CHECKS: ${{ inputs.netlify-checks }}
           CHECK_NAME: ${{ inputs.check-name }}
+          MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
         with:
           script: |
             const {owner, repo} = context.repo;
             const repository = (await github.rest.repos.get({owner, repo})).data;
             const candidates = await github.paginate(github.rest.pulls.list, {owner, repo, state: 'open',
                   base: repository.default_branch, per_page: 100});
+            async function mergeRequest(path, method, body) {
+              const response = await fetch(`${process.env.GITHUB_API_URL}${path}`, {
+                method, headers: {Authorization: `Bearer ${process.env.MERGE_TOKEN}`,
+                  Accept: 'application/vnd.github+json', 'Content-Type': 'application/json',
+                  'X-GitHub-Api-Version': '2022-11-28'}, body: JSON.stringify(body)});
+              const result = await response.json();
+              if (!response.ok || result.errors) {
+                throw new Error(`Merge request failed (${response.status}): ${result.message ?? 'GraphQL error'}`);
+              }
+              return result;
+            }
             async function processPull(number) {
               const getPull = async () => (await github.rest.pulls.get({owner, repo, pull_number: number})).data;
               const pull = await getPull();
@@ -102,16 +131,25 @@ jobs:
                   state: 'pending', description: 'CodeRabbit approval changed; waiting for review.', target_url: pull.html_url});
                 return;
               }
+              const method = final.head.ref === 'preview' && final.head.repo?.full_name === final.base.repo?.full_name
+                ? 'merge' : 'squash';
               if (final.mergeable_state === 'clean') {
-                await github.rest.pulls.merge({owner, repo, pull_number: number, sha, merge_method: 'squash'});
+                if (process.env.MERGE_TOKEN) {
+                  await mergeRequest(`/repos/${owner}/${repo}/pulls/${number}/merge`, 'PUT', {sha, merge_method: method});
+                } else {
+                  await github.rest.pulls.merge({owner, repo, pull_number: number, sha, merge_method: method});
+                }
                 return;
               }
               if (final.auto_merge) return core.info('Auto-merge is already enabled.');
-              await github.graphql(`mutation($id: ID!, $sha: GitObjectID!) {
-                enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $sha, mergeMethod: SQUASH}) {
+              const mutation = `mutation($id: ID!, $sha: GitObjectID!, $method: PullRequestMergeMethod!) {
+                enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $sha, mergeMethod: $method}) {
                   pullRequest { number }
                 }
-              }`, {id: final.node_id, sha});
+              }`;
+              const variables = {id: final.node_id, sha, method: method.toUpperCase()};
+              if (process.env.MERGE_TOKEN) await mergeRequest('/graphql', 'POST', {query: mutation, variables});
+              else await github.graphql(mutation, variables);
             }
             let failed = false;
             for (const pull of candidates) {

@@ -106,7 +106,7 @@ test('already-green PR merges immediately with the validated SHA', async () => {
   assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'squash'}]);
 });
 test('automatic merge is bound to the validated head', async () => {
-  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head'}]);
+  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head', method: 'SQUASH'}]);
 });
 test('every expected Netlify context must be centrally required', async () => {
   const result = await scenario({netlify: ['netlify/app/deploy-preview', 'netlify/site/deploy-preview'],
@@ -155,4 +155,11 @@ test('dismissal during notifier reads blocks both status and merge gates', async
     assert.equal(result.statuses.at(-1).state, 'pending');
     if (dismissAt === 3) assert.equal(result.statuses[0].state, 'pending');
   }
+});
+
+test('CloudCannon preview merges preserve ancestry', async () => {
+  const result = await scenario({pull: {mergeable_state: 'clean',
+    head: {sha: 'head', ref: 'preview', repo: {full_name: 'o/r'}},
+    base: {ref: 'main', repo: {full_name: 'o/r'}}}});
+  assert.equal(result.merges[0].merge_method, 'merge');
 });
