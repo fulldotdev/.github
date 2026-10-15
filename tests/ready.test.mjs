@@ -7,8 +7,8 @@ const source = readFileSync(new URL('../.github/workflows/ready.yml', import.met
 const execute = new (Object.getPrototypeOf(async function () {}).constructor)('github', 'context', 'core', 'process', 'fetch', source);
 
 async function scenario(options = {}) {
-  const pull = {number: 1, node_id: 'PR1', state: 'open', draft: false, head: {sha: 'head'},
-    base: {ref: 'main'}, labels: options.selected ? [{name: 'review-ready'}] : [], html_url: 'https://github.com/o/r/pull/1',
+  const pull = {number: 1, node_id: 'PR1', state: 'open', draft: false, head: {sha: 'head', ref: 'preview', repo: {full_name: 'o/r'}},
+    base: {ref: 'main', repo: {full_name: 'o/r'}}, user: {type: 'Bot', login: 'cloudcannon[bot]'}, labels: options.selected ? [{name: 'review-ready'}] : [], html_url: 'https://github.com/o/r/pull/1',
     ...options.pull};
   const pulls = options.pulls ?? [pull];
   const errors = [];
@@ -19,7 +19,7 @@ async function scenario(options = {}) {
     rest: {
       pulls: {get: async ({pull_number}) => ({data: ++reads >= 2 && options.changed ? {...pull, head: {sha: 'new'}} : pulls.find(candidate => candidate.number === pull_number)}),
         listReviews: 'reviews', list: 'pulls', merge: async args => { if (options.rejectPull === args.pull_number) throw Object.assign(new Error('Head changed'), {status: 409}); merges.push(args); }},
-      repos: {get: async () => ({data: {default_branch: 'main', allow_auto_merge: options.autoMerge !== false}}),
+      repos: {get: async () => ({data: {default_branch: 'main', full_name: 'o/r', allow_auto_merge: options.autoMerge !== false}}),
         getContent: async ({ref}) => {
           options.notifierRead?.();
           if (options.missingNotifier && ref.startsWith('refs/pull/')) throw Object.assign(new Error('Not found'), {status: 404});
@@ -52,7 +52,7 @@ async function scenario(options = {}) {
 
 const approval = {id: 1, user: {type: 'Bot', login: 'coderabbitai[bot]'}, state: 'APPROVED', commit_id: 'head'};
 
-test('Ready with real checks and no selected review enables auto-merge', async () => {
+test('CloudCannon publication with real checks and no selected review enables auto-merge', async () => {
   const result = await scenario();
   assert.equal(result.statuses[0].state, 'success');
   assert.equal(result.merges.length, 1);
@@ -113,14 +113,14 @@ test('successful Check workflow completion resumes the associated PR', async () 
 });
 test('already-green PR merges immediately with the validated SHA', async () => {
   const result = await scenario({pull: {mergeable_state: 'clean'}});
-  assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'squash'}]);
+  assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'merge'}]);
 });
 test('automatic merge is bound to the validated head', async () => {
-  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head', mergeMethod: 'SQUASH'}]);
+  assert.deepEqual((await scenario()).merges, [{id: 'PR1', sha: 'head', mergeMethod: 'MERGE'}]);
 });
 test('unrequired failures do not strand an otherwise eligible PR', async () => {
   const result = await scenario({pull: {mergeable_state: 'unstable'}});
-  assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'squash'}]);
+  assert.deepEqual(result.merges, [{owner: 'o', repo: 'r', pull_number: 1, sha: 'head', merge_method: 'merge'}]);
   const denied = await scenario({pull: {mergeable_state: 'unstable'}, rejectPull: 1});
   assert.equal(denied.merges.length, 0);
   assert.match(denied.errors[0], /Head changed/);
@@ -147,13 +147,13 @@ test('selected review cannot remove or modify the trusted review notifier', asyn
 });
 test('every event reconciles other open PRs, even when concurrency coalesces events', async () => {
   const pulls = [1, 2].map(number => ({number, node_id: `PR${number}`, state: 'open', draft: false,
-    head: {sha: `head${number}`}, base: {ref: 'main'}, labels: [], html_url: `https://github.com/o/r/pull/${number}`}));
+    head: {sha: `head${number}`, ref: 'preview', repo: {full_name: 'o/r'}}, base: {ref: 'main', repo: {full_name: 'o/r'}}, user: {type: 'Bot', login: 'cloudcannon[bot]'}, labels: [], html_url: `https://github.com/o/r/pull/${number}`}));
   const result = await scenario({pulls, event: {pull_request: {number: 2}}});
   assert.deepEqual(result.merges.map(merge => merge.id), ['PR1', 'PR2']);
 });
 test('a rejected merge does not stop reconciliation of later PRs', async () => {
   const pulls = [1, 2].map(number => ({number, node_id: `PR${number}`, state: 'open', draft: false,
-    head: {sha: `head${number}`}, base: {ref: 'main'}, labels: [], mergeable_state: 'clean',
+    head: {sha: `head${number}`, ref: 'preview', repo: {full_name: 'o/r'}}, base: {ref: 'main', repo: {full_name: 'o/r'}}, user: {type: 'Bot', login: 'cloudcannon[bot]'}, labels: [], mergeable_state: 'clean',
     html_url: `https://github.com/o/r/pull/${number}`}));
   const result = await scenario({pulls, rejectPull: 1});
   assert.deepEqual(result.merges.map(merge => merge.pull_number), [2]);
@@ -192,8 +192,8 @@ test('release app handles only the merge while Review remains an Actions status'
     assert.equal(requests.length, 1);
     assert.equal(requests[0].options.headers.Authorization, 'Bearer synthetic-token');
     const body = JSON.parse(requests[0].options.body);
-    if (mergeable_state !== 'blocked') assert.deepEqual(body, {sha: 'head', merge_method: 'squash'});
-    else assert.deepEqual(body.variables, {id: 'PR1', sha: 'head', mergeMethod: 'SQUASH'});
+    if (mergeable_state !== 'blocked') assert.deepEqual(body, {sha: 'head', merge_method: 'merge'});
+    else assert.deepEqual(body.variables, {id: 'PR1', sha: 'head', mergeMethod: 'MERGE'});
   }
 });
 test('release app rejection is reported without treating the PR as merged', async () => {
@@ -240,4 +240,21 @@ test('mixed or absent workflow metadata cannot authorize an old successful resul
   }
   assert.equal((await scenario({checks: [{id: 1, name: 'Check / Check', app: {id: 15368},
     conclusion: 'success', details_url: 'invalid'}]})).merges.length, 0);
+});
+
+
+test('ordinary Ready code PRs pass Review without any automatic merge', async () => {
+  for (const pull of [
+    {user: {type: 'User', login: 'silveltman'}},
+    {user: {type: 'Bot', login: 'dependabot[bot]'}},
+    {head: {sha: 'head', ref: 'feature/code', repo: {full_name: 'o/r'}}},
+    {head: {sha: 'head', ref: 'preview', repo: {full_name: 'fork/r'}}},
+    {head: {sha: 'head', ref: 'preview'}},
+  ]) {
+    for (const mergeable_state of ['clean', 'blocked', 'unstable']) {
+      const result = await scenario({pull: {...pull, mergeable_state}});
+      assert.equal(result.statuses[0].state, 'success');
+      assert.equal(result.merges.length, 0);
+    }
+  }
 });

@@ -7,7 +7,9 @@ Callers pin a full commit SHA from `main` after the shared workflow PR is merged
 New projects take their callers from [astro-template](https://github.com/fulldotdev/astro-template) or [vite-template](https://github.com/fulldotdev/vite-template).
 
 - **Finalize (Prepare)** leaves a complete draft PR. Previews build; full checks wait for Ready.
-- **Dispatch (Release)** validates the affected behavior and marks the PR Ready, authorizing automatic merge once the required checks and previews pass. Choose `review-ready` before marking Ready when CodeRabbit approval is needed.
+- **Dispatch (Release)** validates the affected behavior and marks the PR Ready. After the required checks and previews pass, the agent merges the validated head and follows its production deployment. Choose `review-ready` before marking Ready when CodeRabbit approval is needed.
 - **Settle (Close)** follows production verification and preserves the result before closing the task.
 
 Organization rules require `Check / Check` and `Review`, without requiring synchronization with main. Netlify requirements are managed centrally for the repositories with those sites. Production keeps its scoped check and build. A skipped or outdated CodeRabbit review cannot satisfy a selected review.
+
+Keep repository auto-merge disabled except for CloudCannon publishers. CloudCannon's Publish button keeps automatic publication for same-repository `preview` PRs created by `cloudcannon[bot]`, with all required checks and previews. Code PRs are merged by their agent.
