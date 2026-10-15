@@ -44,7 +44,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
       # Only the merge uses this token, so existing push-triggered releases still run.
       # Only GitHub metadata is read. Never check out or execute PR code here.
-      - name: Require selected review and enable auto-merge
+      - name: Require selected review and publish CloudCannon changes
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           NETLIFY_CHECKS: ${{ inputs.netlify-checks }}
@@ -111,6 +111,14 @@ jobs:
                   : 'Waiting for CodeRabbit approval of this revision.',
                 target_url: pull.html_url});
               if (!reviewPassed) return;
+              // Agents own code merges so they can follow the production deployment.
+              // Keep the customer's CloudCannon Publish button automatic.
+              const isCloudCannonPublication = candidate => candidate.user?.type === 'Bot'
+                && candidate.user.login === 'cloudcannon[bot]'
+                && candidate.head.ref === 'preview'
+                && candidate.head.repo?.full_name === repository.full_name
+                && candidate.base.repo?.full_name === repository.full_name;
+              if (!isCloudCannonPublication(pull)) return core.info('Ready for the agent to merge and verify production.');
               // Workflow events can create jobs out of order. Compare the originating run first.
               // A skipped draft Check must never authorize automatic publication.
               const checks = await github.paginate(github.rest.checks.listForRef, {owner, repo, ref: sha, per_page: 100});
@@ -132,6 +140,7 @@ jobs:
               const final = await getPull();
               if (final.state !== 'open' || final.draft || final.base.ref !== pull.base.ref || final.head.sha !== sha
                 || final.labels.some(label => label.name === 'review-ready') !== selected) return;
+              if (!isCloudCannonPublication(final)) return;
               if (selected && (!await hasTrustedNotifier() || !await hasApproval())) {
                 await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
                   state: 'pending', description: 'CodeRabbit approval changed; waiting for review.', target_url: pull.html_url});
