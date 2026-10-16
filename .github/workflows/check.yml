@@ -3,6 +3,9 @@ name: Check
 on:
   workflow_call:
     inputs:
+      runner:
+        type: string
+        default: ubuntu-latest
       command:
         type: string
         default: vp run check
@@ -20,7 +23,7 @@ jobs:
   check:
     name: Check
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 15
     env:
       pnpm_config_ignore_scripts: "true"
