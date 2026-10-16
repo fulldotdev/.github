@@ -3,6 +3,9 @@ name: Ready
 on:
   workflow_call:
     inputs:
+      runner:
+        type: string
+        default: ubuntu-latest
       netlify-checks:
         type: string
         default: "[]"
@@ -30,7 +33,7 @@ concurrency:
 jobs:
   ready:
     name: Ready
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 3
     steps:
       - name: Create merge token for repositories with release workflows
