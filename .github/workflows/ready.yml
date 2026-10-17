@@ -26,6 +26,7 @@ on:
         required: false
 
 permissions:
+  actions: read
   contents: write
   pull-requests: write
   statuses: write
@@ -87,22 +88,37 @@ jobs:
               const requiredTests = JSON.parse(process.env.TEST_CHECKS || '[]');
               const isSelected = candidate => process.env.REQUIRE_CODERABBIT !== 'false'
                 && candidate.labels.some(label => label.name === 'review-ready');
+              if (requiredTests.length) await github.rest.repos.createCommitStatus({owner, repo, sha,
+                context: 'Review', state: 'pending', description: 'Checking the current Test run and attempt.',
+                target_url: pull.html_url});
               async function testsPassed() {
                 if (!requiredTests.length) return true;
-                const checks = await github.paginate(github.rest.checks.listForRef,
-                  {owner, repo, ref: sha, per_page: 100});
-                const workflow = context.payload.workflow_run;
-                const runId = check => Number(check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1]);
-                return requiredTests.every(name => {
-                  const candidates = checks.filter(check => check.name === name && check.app?.id === 15368);
-                  if (!candidates.length || candidates.some(check => !runId(check))) return false;
-                  const latest = candidates.sort((a, b) => runId(b) - runId(a) || b.id - a.id)[0];
-                  if (workflow?.name === 'Test' && workflow.head_sha === sha
-                    && Number(workflow.id) >= runId(latest)
-                    && (Number(workflow.id) !== runId(latest) || workflow.status !== 'completed'
-                      || workflow.conclusion !== 'success')) return false;
-                  return latest.status === 'completed' && latest.conclusion === 'success';
-                });
+                // Read the current run and attempt on every event. Check runs can
+                // still show a previous success while the workflow is rerunning.
+                const event = context.payload.workflow_run;
+                for (let retry = 0; retry < 4; retry++) {
+                  const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo,
+                    {owner, repo, head_sha: sha, event: 'pull_request', per_page: 100});
+                  const run = runs.filter(run => run.name === 'Test' && run.head_sha === sha
+                    && run.path === '.github/workflows/test.yml')
+                    .sort((a, b) => b.id - a.id)[0];
+                  const eventIsNewer = event?.name === 'Test' && event.head_sha === sha
+                    && (!run || event.id > run.id || (event.id === run.id
+                      && event.run_attempt > run.run_attempt));
+                  if (eventIsNewer) {
+                    if (event.status !== 'completed' || event.conclusion !== 'success') return false;
+                  } else if (run) {
+                    if (run.status !== 'completed' || run.conclusion !== 'success') return false;
+                    const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt,
+                      {owner, repo, run_id: run.id, attempt_number: run.run_attempt, per_page: 100});
+                    if (requiredTests.every(name => jobs.some(job => job.name === name
+                      && job.status === 'completed' && job.conclusion === 'success'))) return true;
+                  }
+                  // Successful completion can precede its jobs' metadata. Retry
+                  // briefly so a final completion event cannot strand the PR.
+                  if (retry < 3) await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+                return false;
               }
               async function hasApproval() {
                 if (!selected) return true;

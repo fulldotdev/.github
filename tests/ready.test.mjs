@@ -4,7 +4,7 @@ import test from 'node:test';
 
 const source = readFileSync(new URL('../.github/workflows/ready.yml', import.meta.url), 'utf8')
   .split('          script: |\n')[1].split('\n').map(line => line.slice(12)).join('\n');
-const execute = new (Object.getPrototypeOf(async function () {}).constructor)('github', 'context', 'core', 'process', 'fetch', source);
+const execute = new (Object.getPrototypeOf(async function () {}).constructor)('github', 'context', 'core', 'process', 'fetch', 'setTimeout', source);
 
 async function scenario(options = {}) {
   const pull = {number: 1, node_id: 'PR1', state: 'open', draft: false, head: {sha: 'head', ref: 'preview', repo: {full_name: 'o/r'}},
@@ -15,6 +15,14 @@ async function scenario(options = {}) {
   const statuses = [];
   const merges = [];
   let reads = 0;
+  let runReads = 0;
+  let jobReads = 0;
+  const checks = () => (options.checks ?? [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'success'}]).map(check =>
+    Object.hasOwn(check, 'details_url') ? check : {...check, details_url: `https://github.com/o/r/actions/runs/${check.id}/job/${check.id}`});
+  const defaultRuns = () => checks().filter(check => check.name === 'Test / Test' && check.app?.id === 15368)
+    .map(check => ({id: Number(check.details_url?.match(/\/actions\/runs\/(\d+)/)?.[1]), run_attempt: 1,
+      name: 'Test', path: '.github/workflows/test.yml', head_sha: 'head', status: check.status, conclusion: check.conclusion}))
+    .filter(run => run.id);
   const github = {
     rest: {
       pulls: {get: async ({pull_number}) => ({data: ++reads >= 2 && options.changed ? {...pull, head: {sha: 'new'}} : pulls.find(candidate => candidate.number === pull_number)}),
@@ -27,10 +35,13 @@ async function scenario(options = {}) {
         },
         createCommitStatus: async status => statuses.push(status)},
       checks: {listForRef: 'checks'},
+      actions: {listWorkflowRunsForRepo: 'runs', listJobsForWorkflowRunAttempt: 'jobs'},
     },
-    paginate: async endpoint => endpoint === 'reviews' ? (options.reviewRead ? options.reviewRead() : options.reviews ?? [])
-      : endpoint === 'pulls' ? pulls : (options.checks ?? [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'success'}]).map(check =>
-        Object.hasOwn(check, 'details_url') ? check : {...check, details_url: `https://github.com/o/r/actions/runs/${check.id}/job/${check.id}`}),
+    paginate: async (endpoint, parameters) => endpoint === 'reviews' ? (options.reviewRead ? options.reviewRead() : options.reviews ?? [])
+      : endpoint === 'pulls' ? pulls
+      : endpoint === 'runs' ? options.runRead ? options.runRead(++runReads) : options.runs ?? defaultRuns()
+      : endpoint === 'jobs' ? options.jobRead ? options.jobRead(++jobReads, parameters) : options.jobs ?? checks()
+      : checks(),
     request: async () => ({data: [{type: 'required_status_checks', parameters: {
       required_status_checks: (options.required ?? ['Check / Check', 'Review']).map(context => ({context})),
     }}]}),
@@ -47,7 +58,7 @@ async function scenario(options = {}) {
     {info: () => {}, error: message => errors.push(message), setFailed: message => errors.push(message)}, {env: {CHECK_NAME: 'Check / Check', NETLIFY_CHECKS: JSON.stringify(options.netlify ?? []),
       REQUIRE_CODERABBIT: String(options.requireCoderabbit ?? true), TEST_CHECKS: JSON.stringify(options.testChecks ?? []),
       GITHUB_API_URL: 'https://api.github.com', MERGE_TOKEN: options.mergeToken}},
-    options.fetch ?? (() => { throw new Error('Unexpected network request'); }));
+    options.fetch ?? (() => { throw new Error('Unexpected network request'); }), resolve => resolve());
   return {statuses, merges, errors};
 }
 
@@ -275,16 +286,60 @@ test('required tests gate Review for ordinary PRs without adding an organization
     {id: 1, name: 'Test / Test', app: {id: 15368}, status: 'completed', conclusion: 'failure'},
     {id: 1, name: 'Test / Test', app: {id: 15368}, status: 'in_progress', conclusion: null},
     {id: 1, name: 'Test / Test', app: {id: 1}, status: 'completed', conclusion: 'success'}]) {
-    assert.equal((await scenario({...options, checks: check ? [check] : []})).statuses[0].state, 'pending');
+    assert.equal((await scenario({...options, checks: check ? [check] : []})).statuses.at(-1).state, 'pending');
   }
   const passed = {id: 2, name: 'Test / Test', app: {id: 15368}, status: 'completed', conclusion: 'success'};
-  assert.equal((await scenario({...options, checks: [passed]})).statuses[0].state, 'success');
-  assert.equal((await scenario({...options, checks: [passed, {...passed, id: 3, status: 'in_progress', conclusion: null}]})).statuses[0].state, 'pending');
-  assert.equal((await scenario({...options, checks: [{...passed, details_url: null}]})).statuses[0].state, 'pending');
+  assert.equal((await scenario({...options, checks: [passed]})).statuses.at(-1).state, 'success');
+  assert.equal((await scenario({...options, checks: [passed, {...passed, id: 3, status: 'in_progress', conclusion: null}]})).statuses.at(-1).state, 'pending');
+  assert.equal((await scenario({...options, checks: [{...passed, details_url: null}]})).statuses.at(-1).state, 'pending');
   assert.equal((await scenario({...options, checks: [passed], event: {workflow_run: {
-    name: 'Test', head_sha: 'head', id: 3, status: 'queued'}}})).statuses[0].state, 'pending');
+    name: 'Test', head_sha: 'head', id: 3, status: 'queued'}}})).statuses.at(-1).state, 'pending');
   assert.equal((await scenario({...options, checks: [passed], event: {workflow_run: {
-    name: 'Test', head_sha: 'head', id: 3, status: 'completed', conclusion: 'failure'}}})).statuses[0].state, 'pending');
-  assert.equal((await scenario({...options, checks: [passed], event: {workflow_run: {
-    name: 'Test', head_sha: 'head', id: 2, status: 'completed', conclusion: 'failure'}}})).statuses[0].state, 'pending');
+    name: 'Test', head_sha: 'head', id: 3, status: 'completed', conclusion: 'failure'}}})).statuses.at(-1).state, 'pending');
+  assert.equal((await scenario({...options, checks: [passed], runs: [{id: 2, run_attempt: 1, name: 'Test', path: '.github/workflows/test.yml', head_sha: 'head', status: 'completed', conclusion: 'failure'}], event: {workflow_run: {
+    name: 'Test', head_sha: 'head', id: 2, status: 'completed', conclusion: 'failure'}}})).statuses.at(-1).state, 'pending');
+});
+
+const trial = {requireCoderabbit: false, testChecks: ['Test / Test'], pull: {user: {type: 'User', login: 'silveltman'}}};
+const testRun = {id: 100, run_attempt: 1, name: 'Test', path: '.github/workflows/test.yml', head_sha: 'head', status: 'completed', conclusion: 'success'};
+const testJob = {id: 200, name: 'Test / Test', status: 'completed', conclusion: 'success'};
+
+test('Check events cannot pass a Test rerun using the preceding successful check', async () => {
+  const result = await scenario({...trial, checks: [{...testJob, app: {id: 15368}}],
+    runs: [{...testRun, run_attempt: 2, status: 'in_progress', conclusion: null}], jobs: [testJob],
+    event: {workflow_run: {name: 'Check', head_sha: 'head', status: 'completed', conclusion: 'success'}}});
+  assert.equal(result.statuses.at(-1).state, 'pending');
+});
+
+test('the exact latest Test attempt supplies every required successful job', async () => {
+  for (const jobs of [[], [{...testJob, conclusion: 'skipped'}], [{...testJob, conclusion: 'failure'}]]) {
+    const result = await scenario({...trial, runs: [{...testRun, run_attempt: 2}], jobRead: (_, parameters) => {
+      assert.equal(parameters.run_id, 100);
+      assert.equal(parameters.attempt_number, 2);
+      return jobs;
+    }});
+    assert.equal(result.statuses.at(-1).state, 'pending');
+  }
+  const result = await scenario({...trial, runs: [{...testRun, run_attempt: 2}], jobs: [testJob]});
+  assert.equal(result.statuses.at(-1).state, 'success');
+});
+
+test('completion retries metadata lag and passes without requiring another event', async () => {
+  let jobReads = 0;
+  const result = await scenario({...trial,
+    event: {workflow_run: {...testRun, id: 101}},
+    runRead: reads => [reads === 1 ? testRun : {...testRun, id: 101}],
+    jobRead: () => ++jobReads === 1 ? [] : [testJob]});
+  assert.equal(result.statuses.at(-1).state, 'success');
+  assert.ok(jobReads >= 2);
+});
+
+test('persistent missing metadata is bounded and API errors revoke old success', async () => {
+  let reads = 0;
+  const missing = await scenario({...trial, runRead: () => {reads++; return [];}});
+  assert.equal(reads, 4);
+  assert.equal(missing.statuses.at(-1).state, 'pending');
+  const failed = await scenario({...trial, runRead: () => {throw new Error('Metadata unavailable');}});
+  assert.equal(failed.statuses.at(-1).state, 'pending');
+  assert.match(failed.errors[0], /Metadata unavailable/);
 });
