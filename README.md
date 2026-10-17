@@ -11,9 +11,11 @@ New projects take their callers from [astro-template](https://github.com/fulldot
 - **Make PR ready** runs enabled checks and tests locally, then CI confirms them. Source checks and unit tests run alongside the Netlify build. URL tests use the preview of the tested PR head.
 - **Merge PR** merges the validated head and follows the production build and short, safe live checks.
 
-The trial callers in `fulldev`, `astro-template` and `vite-template` use `check:source` and the selected categories in `test.yml`. Devices stay manual. They pass `require-coderabbit: false` and require `Test / Test` through the existing `Review` status. Missing, skipped, failed or superseded test results cannot pass that gate. Other callers retain their existing behavior until migrated.
+Node repositories expose `check:source` and the categories they actually use. Existing unit tests run through `test:unit`; artifact checks consume the build through `check:build`. Enable HTTP and browser tests only where the repository has useful tests and a matching deployment target. Devices stay manual. Do not add empty scripts or test workflows for disabled categories.
 
-The Ready caller grants `actions: read` so the gate reads the current Test workflow attempt and its jobs, including reruns. Existing repositories remain pinned to their previous workflow revision until migrated.
+Repositories with `test.yml` require `Test / Test` through the existing `Review` status. Missing, skipped, failed or superseded test results cannot pass that gate. Independent agent review owns code assessment; Ready has no external review-service dependency.
+
+The Ready caller grants `actions: read` so the gate reads the current Test workflow attempt and its jobs, including reruns. Non-Node repositories keep their existing language-specific check command with dependency installation disabled.
 
 Organization rules require `Check / Check` and `Review`, without requiring synchronization with main. Netlify requirements are managed centrally for repositories with those sites. Production keeps scoped source, build and artifact checks. Live URL tests run after the current production deployment has been confirmed, rather than inside its build command.
 

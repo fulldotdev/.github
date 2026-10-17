@@ -26,19 +26,13 @@ async function scenario(options = {}) {
   const github = {
     rest: {
       pulls: {get: async ({pull_number}) => ({data: ++reads >= 2 && options.changed ? {...pull, head: {sha: 'new'}} : pulls.find(candidate => candidate.number === pull_number)}),
-        listReviews: 'reviews', list: 'pulls', merge: async args => { if (options.rejectPull === args.pull_number) throw Object.assign(new Error('Head changed'), {status: 409}); merges.push(args); }},
+        list: 'pulls', merge: async args => { if (options.rejectPull === args.pull_number) throw Object.assign(new Error('Head changed'), {status: 409}); merges.push(args); }},
       repos: {get: async () => ({data: {default_branch: 'main', full_name: 'o/r', allow_auto_merge: options.autoMerge !== false}}),
-        getContent: async ({ref}) => {
-          options.notifierRead?.();
-          if (options.missingNotifier && ref.startsWith('refs/pull/')) throw Object.assign(new Error('Not found'), {status: 404});
-          return {data: {type: 'file', sha: options.changedNotifier && ref.startsWith('refs/pull/') ? 'modified' : 'trusted'}};
-        },
         createCommitStatus: async status => statuses.push(status)},
       checks: {listForRef: 'checks'},
       actions: {listWorkflowRunsForRepo: 'runs', listJobsForWorkflowRunAttempt: 'jobs'},
     },
-    paginate: async (endpoint, parameters) => endpoint === 'reviews' ? (options.reviewRead ? options.reviewRead() : options.reviews ?? [])
-      : endpoint === 'pulls' ? pulls
+    paginate: async (endpoint, parameters) => endpoint === 'pulls' ? pulls
       : endpoint === 'runs' ? options.runRead ? options.runRead(++runReads) : options.runs ?? defaultRuns()
       : endpoint === 'jobs' ? options.jobRead ? options.jobRead(++jobReads, parameters) : options.jobs ?? checks()
       : checks(),
@@ -56,15 +50,13 @@ async function scenario(options = {}) {
   };
   await execute(github, {repo: {owner: 'o', repo: 'r'}, payload: options.event ?? {pull_request: {number: 1}}},
     {info: () => {}, error: message => errors.push(message), setFailed: message => errors.push(message)}, {env: {CHECK_NAME: 'Check / Check', NETLIFY_CHECKS: JSON.stringify(options.netlify ?? []),
-      REQUIRE_CODERABBIT: String(options.requireCoderabbit ?? true), TEST_CHECKS: JSON.stringify(options.testChecks ?? []),
+      TEST_CHECKS: JSON.stringify(options.testChecks ?? []),
       GITHUB_API_URL: 'https://api.github.com', MERGE_TOKEN: options.mergeToken}},
     options.fetch ?? (() => { throw new Error('Unexpected network request'); }), resolve => resolve());
   return {statuses, merges, errors};
 }
 
-const approval = {id: 1, user: {type: 'Bot', login: 'coderabbitai[bot]'}, state: 'APPROVED', commit_id: 'head'};
-
-test('CloudCannon publication with real checks and no selected review enables auto-merge', async () => {
+test('CloudCannon publication with real checks enables auto-merge', async () => {
   const result = await scenario();
   assert.equal(result.statuses[0].state, 'success');
   assert.equal(result.merges.length, 1);
@@ -73,27 +65,6 @@ test('draft remains pending and cannot auto-merge', async () => {
   const result = await scenario({pull: {draft: true}});
   assert.equal(result.statuses[0].state, 'pending');
   assert.equal(result.merges.length, 0);
-});
-test('selected but missing, skipped or rate-limited review stays pending', async () => {
-  const result = await scenario({selected: true});
-  assert.equal(result.statuses[0].state, 'pending');
-  assert.equal(result.merges.length, 0);
-});
-test('selected approval must be from CodeRabbit at the current revision', async () => {
-  for (const review of [{...approval, commit_id: 'old'}, {...approval, user: {type: 'User', login: 'coderabbitai[bot]'}},
-    {...approval, user: {type: 'Bot', login: 'another[bot]'}}]) {
-    const result = await scenario({selected: true, reviews: [review]});
-    assert.equal(result.statuses[0].state, 'pending');
-    assert.equal(result.merges.length, 0);
-  }
-  assert.equal((await scenario({selected: true, reviews: [approval]})).merges.length, 1);
-});
-test('requested changes or dismissed approval supersede an earlier approval', async () => {
-  for (const state of ['CHANGES_REQUESTED', 'DISMISSED']) {
-    const result = await scenario({selected: true, reviews: [approval, {...approval, id: 2, state}]});
-    assert.equal(result.statuses[0].state, 'pending');
-    assert.equal(result.merges.length, 0);
-  }
 });
 test('skipped, failed or absent static checks never authorize publication', async () => {
   for (const checks of [[], [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'skipped'}],
@@ -142,21 +113,6 @@ test('every expected Netlify context must be centrally required', async () => {
     required: ['Check / Check', 'Review', 'netlify/app/deploy-preview']});
   assert.equal(result.merges.length, 0);
 });
-test('dismissal during processing never writes stale approval', async () => {
-  let reads = 0;
-  const result = await scenario({selected: true,
-    reviewRead: () => ++reads === 1 ? [approval] : [{...approval, state: 'DISMISSED'}]});
-  assert.equal(result.statuses[0].state, 'pending');
-  assert.equal(result.merges.length, 0);
-});
-
-test('selected review cannot remove or modify the trusted review notifier', async () => {
-  for (const options of [{changedNotifier: true}, {missingNotifier: true}]) {
-    const result = await scenario({...options, selected: true, reviews: [approval]});
-    assert.equal(result.statuses[0].state, 'pending');
-    assert.equal(result.merges.length, 0);
-  }
-});
 test('every event reconciles other open PRs, even when concurrency coalesces events', async () => {
   const pulls = [1, 2].map(number => ({number, node_id: `PR${number}`, state: 'open', draft: false,
     head: {sha: `head${number}`, ref: 'preview', repo: {full_name: 'o/r'}}, base: {ref: 'main', repo: {full_name: 'o/r'}}, user: {type: 'Bot', login: 'cloudcannon[bot]'}, labels: [], html_url: `https://github.com/o/r/pull/${number}`}));
@@ -171,19 +127,6 @@ test('a rejected merge does not stop reconciliation of later PRs', async () => {
   assert.deepEqual(result.merges.map(merge => merge.pull_number), [2]);
   assert.match(result.errors[0], /PR #1: Head changed/);
   assert.equal(result.errors.length, 2);
-});
-
-test('dismissal during notifier reads blocks both status and merge gates', async () => {
-  for (const dismissAt of [3, 5]) {
-    let reads = 0;
-    let dismissed = false;
-    const result = await scenario({selected: true, pull: {mergeable_state: 'clean'},
-      notifierRead: () => { if (++reads === dismissAt) dismissed = true; },
-      reviewRead: () => [{...approval, state: dismissed ? 'DISMISSED' : 'APPROVED'}]});
-    assert.equal(result.merges.length, 0);
-    assert.equal(result.statuses.at(-1).state, 'pending');
-    if (dismissAt === 3) assert.equal(result.statuses[0].state, 'pending');
-  }
 });
 
 test('CloudCannon preview merges preserve ancestry', async () => {
@@ -271,15 +214,15 @@ test('ordinary Ready code PRs pass Review without any automatic merge', async ()
   }
 });
 
-test('trial repositories no longer depend on CodeRabbit selection or quota', async () => {
-  const result = await scenario({selected: true, requireCoderabbit: false, changedNotifier: true,
+test('legacy review labels do not add an external review dependency', async () => {
+  const result = await scenario({selected: true,
     pull: {user: {type: 'User', login: 'silveltman'}}});
   assert.equal(result.statuses[0].state, 'success');
   assert.equal(result.merges.length, 0);
 });
 
 test('required tests gate Review for ordinary PRs without adding an organization rule', async () => {
-  const options = {requireCoderabbit: false, testChecks: ['Test / Test'],
+  const options = {testChecks: ['Test / Test'],
     pull: {user: {type: 'User', login: 'silveltman'}}};
   for (const check of [null,
     {id: 1, name: 'Test / Test', app: {id: 15368}, status: 'completed', conclusion: 'skipped'},
@@ -300,7 +243,7 @@ test('required tests gate Review for ordinary PRs without adding an organization
     name: 'Test', head_sha: 'head', id: 2, status: 'completed', conclusion: 'failure'}}})).statuses.at(-1).state, 'pending');
 });
 
-const trial = {requireCoderabbit: false, testChecks: ['Test / Test'], pull: {user: {type: 'User', login: 'silveltman'}}};
+const trial = {testChecks: ['Test / Test'], pull: {user: {type: 'User', login: 'silveltman'}}};
 const testRun = {id: 100, run_attempt: 1, name: 'Test', path: '.github/workflows/test.yml', head_sha: 'head', status: 'completed', conclusion: 'success'};
 const testJob = {id: 200, name: 'Test / Test', status: 'completed', conclusion: 'success'};
 
