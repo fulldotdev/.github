@@ -5,16 +5,13 @@ on:
     inputs:
       runner:
         type: string
-        default: ubuntu-latest
+        default: blacksmith-2vcpu-ubuntu-2404
       netlify-checks:
         type: string
         default: "[]"
       check-name:
         type: string
         default: Check / Check
-      require-coderabbit:
-        type: boolean
-        default: true
       test-checks:
         type: string
         default: "[]"
@@ -58,7 +55,6 @@ jobs:
         env:
           NETLIFY_CHECKS: ${{ inputs.netlify-checks }}
           CHECK_NAME: ${{ inputs.check-name }}
-          REQUIRE_CODERABBIT: ${{ inputs.require-coderabbit }}
           TEST_CHECKS: ${{ inputs.test-checks }}
           MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
         with:
@@ -83,11 +79,7 @@ jobs:
               const pull = await getPull();
               if (pull.state !== 'open' || pull.base.ref !== repository.default_branch) return;
               const sha = pull.head.sha;
-              const selected = process.env.REQUIRE_CODERABBIT !== 'false'
-                && pull.labels.some(label => label.name === 'review-ready');
               const requiredTests = JSON.parse(process.env.TEST_CHECKS || '[]');
-              const isSelected = candidate => process.env.REQUIRE_CODERABBIT !== 'false'
-                && candidate.labels.some(label => label.name === 'review-ready');
               if (requiredTests.length) await github.rest.repos.createCommitStatus({owner, repo, sha,
                 context: 'Review', state: 'pending', description: 'Checking the current Test run and attempt.',
                 target_url: pull.html_url});
@@ -129,43 +121,16 @@ jobs:
                 if (completedRunPending) throw new Error('Successful Test metadata is still incomplete. Rerun Ready to reconcile it.');
                 return false;
               }
-              async function hasApproval() {
-                if (!selected) return true;
-                const reviews = await github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number: number, per_page: 100});
-                const decisions = reviews.filter(review => review.user?.type === 'Bot'
-                  && review.user.login === 'coderabbitai[bot]'
-                  && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state));
-                const latest = decisions.sort((a, b) => {
-                  const runId = check => Number(check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1] ?? check.id);
-                  return runId(b) - runId(a) || b.id - a.id;
-                })[0];
-                return latest?.state === 'APPROVED' && latest.commit_id === sha;
-              }
-              async function hasTrustedNotifier() {
-                if (!selected) return true;
-                try {
-                  const path = '.github/workflows/review-event.yml';
-                  const trusted = (await github.rest.repos.getContent({owner, repo, path,
-                    ref: repository.default_branch})).data;
-                  const merged = (await github.rest.repos.getContent({owner, repo, path,
-                    ref: `refs/pull/${number}/merge`})).data;
-                  return trusted.type === 'file' && merged.type === 'file' && trusted.sha === merged.sha;
-                } catch (error) {
-                  if (error.status === 404) return false;
-                  throw error;
-                }
-              }
-              const approved = await hasTrustedNotifier() && await hasApproval() && await testsPassed();
+              const approved = await testsPassed();
               const current = await getPull();
-              if (current.base.ref !== pull.base.ref || current.head.sha !== sha || current.draft !== pull.draft
-                || isSelected(current) !== selected) return;
-              const reviewPassed = !pull.draft && approved && await hasTrustedNotifier() && await hasApproval()
-                && await testsPassed();
+              if (current.state !== 'open' || current.base.ref !== pull.base.ref
+                || current.head.sha !== sha || current.draft !== pull.draft) return;
+              const reviewPassed = !pull.draft && approved && await testsPassed();
               await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
                 state: reviewPassed ? 'success' : 'pending',
                 description: pull.draft ? 'Draft: publication is not authorized.'
-                  : reviewPassed ? (selected ? 'CodeRabbit approved this revision.' : 'Ready requirements passed for this revision.')
-                  : 'Waiting for required tests or selected review of this revision.',
+                  : reviewPassed ? 'Ready requirements passed for this revision.'
+                  : 'Waiting for required tests of this revision.',
                 target_url: pull.html_url});
               if (!reviewPassed) return;
               // Agents own code merges so they can follow the production deployment.
@@ -195,14 +160,8 @@ jobs:
               }
               if (!repository.allow_auto_merge) return core.info('Repository auto-merge is not enabled yet.');
               const final = await getPull();
-              if (final.state !== 'open' || final.draft || final.base.ref !== pull.base.ref || final.head.sha !== sha
-                || isSelected(final) !== selected) return;
+              if (final.state !== 'open' || final.draft || final.base.ref !== pull.base.ref || final.head.sha !== sha) return;
               if (!isCloudCannonPublication(final)) return;
-              if (selected && (!await hasTrustedNotifier() || !await hasApproval())) {
-                await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
-                  state: 'pending', description: 'CodeRabbit approval changed; waiting for review.', target_url: pull.html_url});
-                return;
-              }
               if (!await testsPassed()) {
                 await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
                   state: 'pending', description: 'Waiting for required tests of this revision.', target_url: pull.html_url});

@@ -5,10 +5,10 @@ on:
     inputs:
       runner:
         type: string
-        default: ubuntu-latest
+        default: blacksmith-4vcpu-ubuntu-2404
       command:
         type: string
-        default: vp run check
+        default: vp run check:source
       install:
         type: boolean
         default: true
