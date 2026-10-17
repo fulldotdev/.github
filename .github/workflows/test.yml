@@ -157,6 +157,7 @@ jobs:
           QA_DEPLOY_URLS: ${{ steps.preview.outputs.deploy-urls }}
           TESTING_SECRET: ${{ secrets.testing-secret }}
         # A virtual display on Linux, for repositories that run a browser headed.
+        shell: bash
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
             xvfb-run -a vp run test:browser

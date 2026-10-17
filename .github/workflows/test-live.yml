@@ -56,6 +56,7 @@ jobs:
       - name: Safe live browser smoke
         if: ${{ inputs.browser }}
         # A virtual display on Linux, for repositories that run a browser headed.
+        shell: bash
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
             xvfb-run -a vp run test:browser
