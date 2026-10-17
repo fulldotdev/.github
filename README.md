@@ -13,6 +13,8 @@ New projects take their callers from [astro-template](https://github.com/fulldot
 
 The trial callers in `fulldev`, `astro-template` and `vite-template` use `check:source` and the selected categories in `test.yml`. Devices stay manual. They pass `require-coderabbit: false` and require `Test / Test` through the existing `Review` status. Missing, skipped, failed or superseded test results cannot pass that gate. Other callers retain their existing behavior until migrated.
 
+The Ready caller grants `actions: read` so the gate reads the current Test workflow attempt and its jobs, including reruns. Existing repositories remain pinned to their previous workflow revision until migrated.
+
 Organization rules require `Check / Check` and `Review`, without requiring synchronization with main. Netlify requirements are managed centrally for repositories with those sites. Production keeps scoped source, build and artifact checks. Live URL tests run after the current production deployment has been confirmed, rather than inside its build command.
 
 Keep repository auto-merge disabled except for CloudCannon publishers. CloudCannon's Publish button keeps automatic publication for same-repository `preview` PRs created by `cloudcannon[bot]`, with all required checks and previews. Code PRs are merged by their agent.
