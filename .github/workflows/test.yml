@@ -1,0 +1,173 @@
+name: Test
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        default: ubuntu-latest
+      unit:
+        type: boolean
+        default: false
+      http:
+        type: boolean
+        default: false
+      browser:
+        type: boolean
+        default: false
+      preview-checks:
+        description: JSON array of Netlify status contexts; the first is BASE_URL.
+        type: string
+        default: "[]"
+      node-version-file:
+        type: string
+        default: .node-version
+    secrets:
+      testing-secret:
+        required: false
+
+permissions:
+  contents: read
+  statuses: read
+  pull-requests: read
+
+jobs:
+  unit:
+    name: Unit
+    if: ${{ !github.event.pull_request.draft && inputs.unit }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    env:
+      pnpm_config_ignore_scripts: "true"
+      pnpm_config_ignore_pnpmfile: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
+        with:
+          version: "1.1.0"
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: true
+          run-install: |
+            args:
+              - --frozen-lockfile
+              - --ignore-scripts
+      - name: Unit and service tests
+        run: vp run test:unit
+
+  web:
+    name: Web
+    if: ${{ !github.event.pull_request.draft && (inputs.http || inputs.browser) }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    # Signed-in tests can share preview accounts across browser targets and PRs.
+    concurrency:
+      group: qa-web-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      pnpm_config_ignore_scripts: "true"
+      pnpm_config_ignore_pnpmfile: "true"
+      QA_PROFILE: preview
+    steps:
+      - name: Resolve previews for this PR revision
+        id: preview
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PREVIEW_CHECKS: ${{ inputs.preview-checks }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pull = context.payload.pull_request;
+            if (!pull) throw new Error('URL tests require a pull_request event.');
+            const names = JSON.parse(process.env.PREVIEW_CHECKS);
+            if (!Array.isArray(names) || !names.length
+              || names.some(name => typeof name !== 'string' || !/^netlify\/[a-z0-9-]+\/deploy-preview$/.test(name))) {
+              throw new Error('Enabled URL tests require preview-checks.');
+            }
+            const sha = pull.head.sha;
+            const deadline = Date.now() + 12 * 60 * 1000;
+            while (Date.now() < deadline) {
+              const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: pull.number});
+              if (current.state !== 'open' || current.draft || current.head.sha !== sha) {
+                throw new Error('PR changed or returned to draft; discard this test run.');
+              }
+              const {data} = await github.rest.repos.getCombinedStatusForRef({owner, repo, ref: sha, per_page: 100});
+              const urls = {};
+              for (const name of names) {
+                const status = data.statuses.find(status => status.context === name);
+                if (['error', 'failure'].includes(status?.state)) {
+                  throw new Error(`${name} failed for ${sha}.`);
+                }
+                if (status?.state !== 'success') continue;
+                const url = new URL(status.target_url);
+                const site = name.split('/')[1];
+                if (url.protocol !== 'https:' || url.username || url.password
+                  || url.hostname !== `deploy-preview-${pull.number}--${site}.netlify.app`) {
+                  throw new Error(`${name} did not return this PR's Netlify preview URL.`);
+                }
+                urls[name] = url.origin;
+              }
+              if (names.every(name => urls[name])) {
+                core.setOutput('base-url', urls[names[0]]);
+                core.setOutput('deploy-urls', JSON.stringify(urls));
+                core.setOutput('sha', sha);
+                return;
+              }
+              core.info(`Waiting for matching previews: ${names.filter(name => !urls[name]).join(', ')}`);
+              await new Promise(resolve => setTimeout(resolve, 15000));
+            }
+            throw new Error('Matching previews did not complete within 12 minutes.');
+      - name: Checkout the tested preview revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.preview.outputs.sha }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
+        with:
+          version: "1.1.0"
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: true
+          run-install: |
+            args:
+              - --frozen-lockfile
+              - --ignore-scripts
+      - name: HTTP tests
+        if: ${{ inputs.http }}
+        env:
+          BASE_URL: ${{ steps.preview.outputs.base-url }}
+          QA_DEPLOY_URLS: ${{ steps.preview.outputs.deploy-urls }}
+        run: vp run test:http
+      - name: Install desktop browsers
+        if: ${{ inputs.browser }}
+        run: vp exec playwright install --with-deps chromium firefox webkit
+      - name: Browser tests
+        if: ${{ inputs.browser }}
+        env:
+          BASE_URL: ${{ steps.preview.outputs.base-url }}
+          QA_DEPLOY_URLS: ${{ steps.preview.outputs.deploy-urls }}
+          TESTING_SECRET: ${{ secrets.testing-secret }}
+        run: vp run test:browser
+
+  test:
+    name: Test
+    if: ${{ always() && !github.event.pull_request.draft }}
+    needs: [unit, web]
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 2
+    steps:
+      - name: Require every enabled category
+        env:
+          UNIT_ENABLED: ${{ inputs.unit }}
+          WEB_ENABLED: ${{ inputs.http || inputs.browser }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          WEB_RESULT: ${{ needs.web.result }}
+        run: |
+          if [[ "$UNIT_ENABLED" == true && "$UNIT_RESULT" != success ]]; then
+            echo 'Enabled unit tests did not succeed.' >&2
+            exit 1
+          fi
+          if [[ "$WEB_ENABLED" == true && "$WEB_RESULT" != success ]]; then
+            echo 'Enabled URL tests did not succeed.' >&2
+            exit 1
+          fi

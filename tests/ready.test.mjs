@@ -45,6 +45,7 @@ async function scenario(options = {}) {
   };
   await execute(github, {repo: {owner: 'o', repo: 'r'}, payload: options.event ?? {pull_request: {number: 1}}},
     {info: () => {}, error: message => errors.push(message), setFailed: message => errors.push(message)}, {env: {CHECK_NAME: 'Check / Check', NETLIFY_CHECKS: JSON.stringify(options.netlify ?? []),
+      REQUIRE_CODERABBIT: String(options.requireCoderabbit ?? true), TEST_CHECKS: JSON.stringify(options.testChecks ?? []),
       GITHUB_API_URL: 'https://api.github.com', MERGE_TOKEN: options.mergeToken}},
     options.fetch ?? (() => { throw new Error('Unexpected network request'); }));
   return {statuses, merges, errors};
@@ -257,4 +258,29 @@ test('ordinary Ready code PRs pass Review without any automatic merge', async ()
       assert.equal(result.merges.length, 0);
     }
   }
+});
+
+test('trial repositories no longer depend on CodeRabbit selection or quota', async () => {
+  const result = await scenario({selected: true, requireCoderabbit: false, changedNotifier: true,
+    pull: {user: {type: 'User', login: 'silveltman'}}});
+  assert.equal(result.statuses[0].state, 'success');
+  assert.equal(result.merges.length, 0);
+});
+
+test('required tests gate Review for ordinary PRs without adding an organization rule', async () => {
+  const options = {requireCoderabbit: false, testChecks: ['Test / Test'],
+    pull: {user: {type: 'User', login: 'silveltman'}}};
+  for (const check of [null,
+    {id: 1, name: 'Test / Test', app: {id: 15368}, status: 'completed', conclusion: 'skipped'},
+    {id: 1, name: 'Test / Test', app: {id: 15368}, status: 'completed', conclusion: 'failure'},
+    {id: 1, name: 'Test / Test', app: {id: 15368}, status: 'in_progress', conclusion: null},
+    {id: 1, name: 'Test / Test', app: {id: 1}, status: 'completed', conclusion: 'success'}]) {
+    assert.equal((await scenario({...options, checks: check ? [check] : []})).statuses[0].state, 'pending');
+  }
+  const passed = {id: 2, name: 'Test / Test', app: {id: 15368}, status: 'completed', conclusion: 'success'};
+  assert.equal((await scenario({...options, checks: [passed]})).statuses[0].state, 'success');
+  assert.equal((await scenario({...options, checks: [passed, {...passed, id: 3, status: 'in_progress', conclusion: null}]})).statuses[0].state, 'pending');
+  assert.equal((await scenario({...options, checks: [{...passed, details_url: null}]})).statuses[0].state, 'pending');
+  assert.equal((await scenario({...options, checks: [passed], event: {workflow_run: {
+    name: 'Test', head_sha: 'head', id: 3, status: 'queued'}}})).statuses[0].state, 'pending');
 });

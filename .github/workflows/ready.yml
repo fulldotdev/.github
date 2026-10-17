@@ -12,7 +12,12 @@ on:
       check-name:
         type: string
         default: Check / Check
-
+      require-coderabbit:
+        type: boolean
+        default: true
+      test-checks:
+        type: string
+        default: "[]"
       merge-app-client-id:
         type: string
         default: ""
@@ -47,11 +52,13 @@ jobs:
           repositories: ${{ github.event.repository.name }}
       # Only the merge uses this token, so existing push-triggered releases still run.
       # Only GitHub metadata is read. Never check out or execute PR code here.
-      - name: Require selected review and publish CloudCannon changes
+      - name: Reconcile publication requirements
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           NETLIFY_CHECKS: ${{ inputs.netlify-checks }}
           CHECK_NAME: ${{ inputs.check-name }}
+          REQUIRE_CODERABBIT: ${{ inputs.require-coderabbit }}
+          TEST_CHECKS: ${{ inputs.test-checks }}
           MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
         with:
           script: |
@@ -75,7 +82,26 @@ jobs:
               const pull = await getPull();
               if (pull.state !== 'open' || pull.base.ref !== repository.default_branch) return;
               const sha = pull.head.sha;
-              const selected = pull.labels.some(label => label.name === 'review-ready');
+              const selected = process.env.REQUIRE_CODERABBIT !== 'false'
+                && pull.labels.some(label => label.name === 'review-ready');
+              const requiredTests = JSON.parse(process.env.TEST_CHECKS || '[]');
+              const isSelected = candidate => process.env.REQUIRE_CODERABBIT !== 'false'
+                && candidate.labels.some(label => label.name === 'review-ready');
+              async function testsPassed() {
+                if (!requiredTests.length) return true;
+                const checks = await github.paginate(github.rest.checks.listForRef,
+                  {owner, repo, ref: sha, per_page: 100});
+                const workflow = context.payload.workflow_run;
+                const runId = check => Number(check.details_url?.match(/\/actions\/runs\/(\d+)(?:\/|$)/)?.[1]);
+                return requiredTests.every(name => {
+                  const candidates = checks.filter(check => check.name === name && check.app?.id === 15368);
+                  if (!candidates.length || candidates.some(check => !runId(check))) return false;
+                  const latest = candidates.sort((a, b) => runId(b) - runId(a) || b.id - a.id)[0];
+                  if (workflow?.name === 'Test' && workflow.head_sha === sha
+                    && Number(workflow.id) >= runId(latest) && workflow.status !== 'completed') return false;
+                  return latest.status === 'completed' && latest.conclusion === 'success';
+                });
+              }
               async function hasApproval() {
                 if (!selected) return true;
                 const reviews = await github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number: number, per_page: 100});
@@ -102,16 +128,17 @@ jobs:
                   throw error;
                 }
               }
-              const approved = await hasTrustedNotifier() && await hasApproval();
+              const approved = await hasTrustedNotifier() && await hasApproval() && await testsPassed();
               const current = await getPull();
               if (current.base.ref !== pull.base.ref || current.head.sha !== sha || current.draft !== pull.draft
-                || current.labels.some(label => label.name === 'review-ready') !== selected) return;
-              const reviewPassed = !pull.draft && approved && await hasTrustedNotifier() && await hasApproval();
+                || isSelected(current) !== selected) return;
+              const reviewPassed = !pull.draft && approved && await hasTrustedNotifier() && await hasApproval()
+                && await testsPassed();
               await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
                 state: reviewPassed ? 'success' : 'pending',
                 description: pull.draft ? 'Draft: publication is not authorized.'
-                  : approved ? (selected ? 'CodeRabbit approved this revision.' : 'No CodeRabbit review selected.')
-                  : 'Waiting for CodeRabbit approval of this revision.',
+                  : reviewPassed ? (selected ? 'CodeRabbit approved this revision.' : 'Ready requirements passed for this revision.')
+                  : 'Waiting for required tests or selected review of this revision.',
                 target_url: pull.html_url});
               if (!reviewPassed) return;
               // Agents own code merges so they can follow the production deployment.
@@ -142,11 +169,16 @@ jobs:
               if (!repository.allow_auto_merge) return core.info('Repository auto-merge is not enabled yet.');
               const final = await getPull();
               if (final.state !== 'open' || final.draft || final.base.ref !== pull.base.ref || final.head.sha !== sha
-                || final.labels.some(label => label.name === 'review-ready') !== selected) return;
+                || isSelected(final) !== selected) return;
               if (!isCloudCannonPublication(final)) return;
               if (selected && (!await hasTrustedNotifier() || !await hasApproval())) {
                 await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
                   state: 'pending', description: 'CodeRabbit approval changed; waiting for review.', target_url: pull.html_url});
+                return;
+              }
+              if (!await testsPassed()) {
+                await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
+                  state: 'pending', description: 'Waiting for required tests of this revision.', target_url: pull.html_url});
                 return;
               }
               const method = final.head.ref === 'preview' && final.head.repo?.full_name === final.base.repo?.full_name

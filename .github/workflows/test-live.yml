@@ -1,0 +1,58 @@
+name: Test live
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        default: ubuntu-latest
+      base-url:
+        type: string
+        required: true
+      revision:
+        description: Commit confirmed as published before dispatching this workflow.
+        type: string
+        required: true
+      http:
+        type: boolean
+        default: true
+      browser:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: Live
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
+    env:
+      pnpm_config_ignore_scripts: "true"
+      pnpm_config_ignore_pnpmfile: "true"
+      BASE_URL: ${{ inputs.base-url }}
+      QA_PROFILE: live
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
+        with:
+          version: "1.1.0"
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            args:
+              - --frozen-lockfile
+              - --ignore-scripts
+      - name: Safe live HTTP smoke
+        if: ${{ inputs.http }}
+        run: vp run test:http
+      - name: Install desktop browsers
+        if: ${{ inputs.browser }}
+        run: vp exec playwright install --with-deps chromium firefox webkit
+      - name: Safe live browser smoke
+        if: ${{ inputs.browser }}
+        run: vp run test:browser
