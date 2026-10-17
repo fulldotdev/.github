@@ -343,3 +343,35 @@ test('persistent missing metadata is bounded and API errors revoke old success',
   assert.equal(failed.statuses.at(-1).state, 'pending');
   assert.match(failed.errors[0], /Metadata unavailable/);
 });
+
+test('completion retries the same run and attempt while its status is stale', async () => {
+  let runReads = 0;
+  let jobReads = 0;
+  const result = await scenario({...trial, event: {workflow_run: testRun},
+    runRead: () => [++runReads === 1 ? {...testRun, status: 'in_progress', conclusion: null} : testRun],
+    jobRead: () => {jobReads++; return [testJob];}});
+  assert.equal(result.statuses.at(-1).state, 'success');
+  assert.ok(runReads >= 3);
+  assert.equal(jobReads, 2);
+  assert.deepEqual(result.errors, []);
+});
+
+test('a completed older attempt cannot authorize a newer pending attempt', async () => {
+  const result = await scenario({...trial, event: {workflow_run: testRun},
+    runs: [{...testRun, run_attempt: 2, status: 'in_progress', conclusion: null}], jobs: [testJob]});
+  assert.equal(result.statuses.at(-1).state, 'pending');
+  assert.deepEqual(result.errors, []);
+});
+
+test('persistent lag after successful completion fails Ready instead of silently waiting', async () => {
+  for (const options of [
+    {runs: [{...testRun, status: 'in_progress', conclusion: null}]},
+    {runs: [testRun], jobs: []},
+    {runs: []},
+  ]) {
+    const result = await scenario({...trial, ...options, event: {workflow_run: testRun}});
+    assert.equal(result.statuses.at(-1).state, 'pending');
+    assert.match(result.errors[0], /metadata is still incomplete/);
+    assert.match(result.errors.at(-1), /could not be reconciled/);
+  }
+});

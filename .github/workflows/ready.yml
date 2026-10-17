@@ -96,6 +96,7 @@ jobs:
                 // Read the current run and attempt on every event. Check runs can
                 // still show a previous success while the workflow is rerunning.
                 const event = context.payload.workflow_run;
+                let completedRunPending = false;
                 for (let retry = 0; retry < 4; retry++) {
                   const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo,
                     {owner, repo, head_sha: sha, event: 'pull_request', per_page: 100});
@@ -105,19 +106,27 @@ jobs:
                   const eventIsNewer = event?.name === 'Test' && event.head_sha === sha
                     && (!run || event.id > run.id || (event.id === run.id
                       && event.run_attempt > run.run_attempt));
+                  const eventIsCurrent = event?.name === 'Test' && event.head_sha === sha
+                    && run && event.id === run.id && event.run_attempt === run.run_attempt;
+                  const completedEvent = (eventIsNewer || eventIsCurrent)
+                    && event.status === 'completed' && event.conclusion === 'success';
+                  completedRunPending = completedEvent
+                    || (run?.status === 'completed' && run.conclusion === 'success');
                   if (eventIsNewer) {
-                    if (event.status !== 'completed' || event.conclusion !== 'success') return false;
+                    if (!completedEvent) return false;
                   } else if (run) {
-                    if (run.status !== 'completed' || run.conclusion !== 'success') return false;
-                    const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt,
-                      {owner, repo, run_id: run.id, attempt_number: run.run_attempt, per_page: 100});
-                    if (requiredTests.every(name => jobs.some(job => job.name === name
-                      && job.status === 'completed' && job.conclusion === 'success'))) return true;
+                    if (run.status === 'completed' && run.conclusion === 'success') {
+                      const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt,
+                        {owner, repo, run_id: run.id, attempt_number: run.run_attempt, per_page: 100});
+                      if (requiredTests.every(name => jobs.some(job => job.name === name
+                        && job.status === 'completed' && job.conclusion === 'success'))) return true;
+                    } else if (!completedEvent) return false;
                   }
                   // Successful completion can precede its jobs' metadata. Retry
                   // briefly so a final completion event cannot strand the PR.
                   if (retry < 3) await new Promise(resolve => setTimeout(resolve, 2000));
                 }
+                if (completedRunPending) throw new Error('Successful Test metadata is still incomplete. Rerun Ready to reconcile it.');
                 return false;
               }
               async function hasApproval() {
