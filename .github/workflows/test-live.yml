@@ -55,4 +55,10 @@ jobs:
         run: vp exec playwright install --with-deps chromium firefox webkit
       - name: Safe live browser smoke
         if: ${{ inputs.browser }}
-        run: vp run test:browser
+        # A virtual display on Linux, for repositories that run a browser headed.
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run -a vp run test:browser
+          else
+            vp run test:browser
+          fi
