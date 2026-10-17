@@ -15,6 +15,10 @@ on:
       browser:
         type: boolean
         default: false
+      web-timeout-minutes:
+        description: Maximum duration including preview waiting, setup and URL tests.
+        type: number
+        default: 30
       preview-checks:
         description: JSON array of Netlify status contexts; the first is BASE_URL.
         type: string
@@ -60,7 +64,7 @@ jobs:
     name: Web
     if: ${{ !github.event.pull_request.draft && (inputs.http || inputs.browser) }}
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.web-timeout-minutes }}
     # Signed-in tests can share preview accounts across browser targets and PRs.
     concurrency:
       group: qa-web-${{ github.repository }}
