@@ -12,7 +12,12 @@ on:
       check-name:
         type: string
         default: Check / Check
-
+      require-coderabbit:
+        type: boolean
+        default: true
+      test-checks:
+        type: string
+        default: "[]"
       merge-app-client-id:
         type: string
         default: ""
@@ -21,6 +26,7 @@ on:
         required: false
 
 permissions:
+  actions: read
   contents: write
   pull-requests: write
   statuses: write
@@ -47,11 +53,13 @@ jobs:
           repositories: ${{ github.event.repository.name }}
       # Only the merge uses this token, so existing push-triggered releases still run.
       # Only GitHub metadata is read. Never check out or execute PR code here.
-      - name: Require selected review and publish CloudCannon changes
+      - name: Reconcile publication requirements
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           NETLIFY_CHECKS: ${{ inputs.netlify-checks }}
           CHECK_NAME: ${{ inputs.check-name }}
+          REQUIRE_CODERABBIT: ${{ inputs.require-coderabbit }}
+          TEST_CHECKS: ${{ inputs.test-checks }}
           MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
         with:
           script: |
@@ -75,7 +83,52 @@ jobs:
               const pull = await getPull();
               if (pull.state !== 'open' || pull.base.ref !== repository.default_branch) return;
               const sha = pull.head.sha;
-              const selected = pull.labels.some(label => label.name === 'review-ready');
+              const selected = process.env.REQUIRE_CODERABBIT !== 'false'
+                && pull.labels.some(label => label.name === 'review-ready');
+              const requiredTests = JSON.parse(process.env.TEST_CHECKS || '[]');
+              const isSelected = candidate => process.env.REQUIRE_CODERABBIT !== 'false'
+                && candidate.labels.some(label => label.name === 'review-ready');
+              if (requiredTests.length) await github.rest.repos.createCommitStatus({owner, repo, sha,
+                context: 'Review', state: 'pending', description: 'Checking the current Test run and attempt.',
+                target_url: pull.html_url});
+              async function testsPassed() {
+                if (!requiredTests.length) return true;
+                // Read the current run and attempt on every event. Check runs can
+                // still show a previous success while the workflow is rerunning.
+                const event = context.payload.workflow_run;
+                let completedRunPending = false;
+                for (let retry = 0; retry < 4; retry++) {
+                  const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo,
+                    {owner, repo, head_sha: sha, event: 'pull_request', per_page: 100});
+                  const run = runs.filter(run => run.name === 'Test' && run.head_sha === sha
+                    && run.path === '.github/workflows/test.yml')
+                    .sort((a, b) => b.id - a.id)[0];
+                  const eventIsNewer = event?.name === 'Test' && event.head_sha === sha
+                    && (!run || event.id > run.id || (event.id === run.id
+                      && event.run_attempt > run.run_attempt));
+                  const eventIsCurrent = event?.name === 'Test' && event.head_sha === sha
+                    && run && event.id === run.id && event.run_attempt === run.run_attempt;
+                  const completedEvent = (eventIsNewer || eventIsCurrent)
+                    && event.status === 'completed' && event.conclusion === 'success';
+                  completedRunPending = completedEvent
+                    || (run?.status === 'completed' && run.conclusion === 'success');
+                  if (eventIsNewer) {
+                    if (!completedEvent) return false;
+                  } else if (run) {
+                    if (run.status === 'completed' && run.conclusion === 'success') {
+                      const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt,
+                        {owner, repo, run_id: run.id, attempt_number: run.run_attempt, per_page: 100});
+                      if (requiredTests.every(name => jobs.some(job => job.name === name
+                        && job.status === 'completed' && job.conclusion === 'success'))) return true;
+                    } else if (!completedEvent) return false;
+                  }
+                  // Successful completion can precede its jobs' metadata. Retry
+                  // briefly so a final completion event cannot strand the PR.
+                  if (retry < 3) await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+                if (completedRunPending) throw new Error('Successful Test metadata is still incomplete. Rerun Ready to reconcile it.');
+                return false;
+              }
               async function hasApproval() {
                 if (!selected) return true;
                 const reviews = await github.paginate(github.rest.pulls.listReviews, {owner, repo, pull_number: number, per_page: 100});
@@ -102,16 +155,17 @@ jobs:
                   throw error;
                 }
               }
-              const approved = await hasTrustedNotifier() && await hasApproval();
+              const approved = await hasTrustedNotifier() && await hasApproval() && await testsPassed();
               const current = await getPull();
               if (current.base.ref !== pull.base.ref || current.head.sha !== sha || current.draft !== pull.draft
-                || current.labels.some(label => label.name === 'review-ready') !== selected) return;
-              const reviewPassed = !pull.draft && approved && await hasTrustedNotifier() && await hasApproval();
+                || isSelected(current) !== selected) return;
+              const reviewPassed = !pull.draft && approved && await hasTrustedNotifier() && await hasApproval()
+                && await testsPassed();
               await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
                 state: reviewPassed ? 'success' : 'pending',
                 description: pull.draft ? 'Draft: publication is not authorized.'
-                  : approved ? (selected ? 'CodeRabbit approved this revision.' : 'No CodeRabbit review selected.')
-                  : 'Waiting for CodeRabbit approval of this revision.',
+                  : reviewPassed ? (selected ? 'CodeRabbit approved this revision.' : 'Ready requirements passed for this revision.')
+                  : 'Waiting for required tests or selected review of this revision.',
                 target_url: pull.html_url});
               if (!reviewPassed) return;
               // Agents own code merges so they can follow the production deployment.
@@ -142,11 +196,16 @@ jobs:
               if (!repository.allow_auto_merge) return core.info('Repository auto-merge is not enabled yet.');
               const final = await getPull();
               if (final.state !== 'open' || final.draft || final.base.ref !== pull.base.ref || final.head.sha !== sha
-                || final.labels.some(label => label.name === 'review-ready') !== selected) return;
+                || isSelected(final) !== selected) return;
               if (!isCloudCannonPublication(final)) return;
               if (selected && (!await hasTrustedNotifier() || !await hasApproval())) {
                 await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
                   state: 'pending', description: 'CodeRabbit approval changed; waiting for review.', target_url: pull.html_url});
+                return;
+              }
+              if (!await testsPassed()) {
+                await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
+                  state: 'pending', description: 'Waiting for required tests of this revision.', target_url: pull.html_url});
                 return;
               }
               const method = final.head.ref === 'preview' && final.head.repo?.full_name === final.base.repo?.full_name
