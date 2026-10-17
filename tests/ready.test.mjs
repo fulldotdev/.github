@@ -283,4 +283,8 @@ test('required tests gate Review for ordinary PRs without adding an organization
   assert.equal((await scenario({...options, checks: [{...passed, details_url: null}]})).statuses[0].state, 'pending');
   assert.equal((await scenario({...options, checks: [passed], event: {workflow_run: {
     name: 'Test', head_sha: 'head', id: 3, status: 'queued'}}})).statuses[0].state, 'pending');
+  assert.equal((await scenario({...options, checks: [passed], event: {workflow_run: {
+    name: 'Test', head_sha: 'head', id: 3, status: 'completed', conclusion: 'failure'}}})).statuses[0].state, 'pending');
+  assert.equal((await scenario({...options, checks: [passed], event: {workflow_run: {
+    name: 'Test', head_sha: 'head', id: 2, status: 'completed', conclusion: 'failure'}}})).statuses[0].state, 'pending');
 });

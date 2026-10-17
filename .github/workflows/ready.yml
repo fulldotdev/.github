@@ -98,7 +98,9 @@ jobs:
                   if (!candidates.length || candidates.some(check => !runId(check))) return false;
                   const latest = candidates.sort((a, b) => runId(b) - runId(a) || b.id - a.id)[0];
                   if (workflow?.name === 'Test' && workflow.head_sha === sha
-                    && Number(workflow.id) >= runId(latest) && workflow.status !== 'completed') return false;
+                    && Number(workflow.id) >= runId(latest)
+                    && (Number(workflow.id) !== runId(latest) || workflow.status !== 'completed'
+                      || workflow.conclusion !== 'success')) return false;
                   return latest.status === 'completed' && latest.conclusion === 'success';
                 });
               }
