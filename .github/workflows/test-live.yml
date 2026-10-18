@@ -17,10 +17,6 @@ on:
         description: Optional JSON array of production origins and their Netlify config/base paths. Waits for this revision or unchanged build inputs.
         type: string
         default: "[]"
-      deploy-urls:
-        description: Optional JSON map of selected Netlify status contexts to production origins, passed to the repository tests.
-        type: string
-        default: ""
       http:
         type: boolean
         default: true
@@ -41,7 +37,6 @@ jobs:
       pnpm_config_ignore_pnpmfile: "true"
       BASE_URL: ${{ inputs.base-url }}
       QA_PROFILE: live
-      QA_DEPLOY_URLS: ${{ inputs.deploy-urls }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
