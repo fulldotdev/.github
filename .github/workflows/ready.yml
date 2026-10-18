@@ -80,9 +80,27 @@ jobs:
               if (pull.state !== 'open' || pull.base.ref !== repository.default_branch) return;
               const sha = pull.head.sha;
               const requiredTests = JSON.parse(process.env.TEST_CHECKS || '[]');
-              if (requiredTests.length) await github.rest.repos.createCommitStatus({owner, repo, sha,
-                context: 'Review', state: 'pending', description: 'Checking the current Test run and attempt.',
-                target_url: pull.html_url});
+              const reviewTarget = {owner, repo, sha, context: 'Review', target_url: pull.html_url};
+              let review;
+              async function setReview(state, description) {
+                // Pending already blocks publication, regardless of its wording.
+                if (review?.state === state && (state === 'pending' || review.description === description)) return;
+                await github.rest.repos.createCommitStatus({...reviewTarget, state, description});
+                review = {state, description};
+              }
+              try {
+                const result = await github.rest.repos.getCombinedStatusForRef({owner, repo, ref: sha, per_page: 100});
+                review = result.data.statuses.find(status => status.context === 'Review');
+              } catch (error) {
+                // A failed status read must not leave a previous success in force.
+                await setReview('pending', 'Unable to verify the current Review status.');
+                throw error;
+              }
+              if (pull.draft) {
+                await setReview('pending', 'Draft: publication is not authorized.');
+                return;
+              }
+              if (requiredTests.length) await setReview('pending', 'Checking the current Test run and attempt.');
               async function testsPassed() {
                 if (!requiredTests.length) return true;
                 // Read the current run and attempt on every event. Check runs can
@@ -126,12 +144,9 @@ jobs:
               if (current.state !== 'open' || current.base.ref !== pull.base.ref
                 || current.head.sha !== sha || current.draft !== pull.draft) return;
               const reviewPassed = !pull.draft && approved && await testsPassed();
-              await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
-                state: reviewPassed ? 'success' : 'pending',
-                description: pull.draft ? 'Draft: publication is not authorized.'
-                  : reviewPassed ? 'Ready requirements passed for this revision.'
-                  : 'Waiting for required tests of this revision.',
-                target_url: pull.html_url});
+              await setReview(reviewPassed ? 'success' : 'pending', reviewPassed
+                ? 'Ready requirements passed for this revision.'
+                : 'Waiting for required tests of this revision.');
               if (!reviewPassed) return;
               // Agents own code merges so they can follow the production deployment.
               // Keep the customer's CloudCannon Publish button automatic.
@@ -163,8 +178,7 @@ jobs:
               if (final.state !== 'open' || final.draft || final.base.ref !== pull.base.ref || final.head.sha !== sha) return;
               if (!isCloudCannonPublication(final)) return;
               if (!await testsPassed()) {
-                await github.rest.repos.createCommitStatus({owner, repo, sha, context: 'Review',
-                  state: 'pending', description: 'Waiting for required tests of this revision.', target_url: pull.html_url});
+                await setReview('pending', 'Waiting for required tests of this revision.');
                 return;
               }
               const method = final.head.ref === 'preview' && final.head.repo?.full_name === final.base.repo?.full_name

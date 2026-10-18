@@ -28,6 +28,10 @@ async function scenario(options = {}) {
       pulls: {get: async ({pull_number}) => ({data: ++reads >= 2 && options.changed ? {...pull, head: {sha: 'new'}} : pulls.find(candidate => candidate.number === pull_number)}),
         list: 'pulls', merge: async args => { if (options.rejectPull === args.pull_number) throw Object.assign(new Error('Head changed'), {status: 409}); merges.push(args); }},
       repos: {get: async () => ({data: {default_branch: 'main', full_name: 'o/r', allow_auto_merge: options.autoMerge !== false}}),
+        getCombinedStatusForRef: async () => {
+          if (options.statusError) throw new Error('Status unavailable');
+          return {data: {statuses: options.review ? [{context: 'Review', ...options.review}] : []}};
+        },
         createCommitStatus: async status => statuses.push(status)},
       checks: {listForRef: 'checks'},
       actions: {listWorkflowRunsForRepo: 'runs', listJobsForWorkflowRunAttempt: 'jobs'},
@@ -53,7 +57,7 @@ async function scenario(options = {}) {
       TEST_CHECKS: JSON.stringify(options.testChecks ?? []),
       GITHUB_API_URL: 'https://api.github.com', MERGE_TOKEN: options.mergeToken}},
     options.fetch ?? (() => { throw new Error('Unexpected network request'); }), resolve => resolve());
-  return {statuses, merges, errors};
+  return {statuses, merges, errors, runReads};
 }
 
 test('CloudCannon publication with real checks enables auto-merge', async () => {
@@ -65,6 +69,37 @@ test('draft remains pending and cannot auto-merge', async () => {
   const result = await scenario({pull: {draft: true}});
   assert.equal(result.statuses[0].state, 'pending');
   assert.equal(result.merges.length, 0);
+});
+test('pending drafts do not append statuses or query Test metadata on repeated events', async () => {
+  for (const description of ['Draft: publication is not authorized.', 'Checking the current Test run and attempt.']) {
+    const result = await scenario({pull: {draft: true}, testChecks: ['Test / Test'],
+      review: {state: 'pending', description}, runRead: () => {throw new Error('Draft must not query Test');}});
+    assert.deepEqual(result.statuses, []);
+    assert.equal(result.runReads, 0);
+    assert.deepEqual(result.errors, []);
+    assert.deepEqual(result.merges, []);
+  }
+});
+test('converting a successful PR to draft revokes its old Review', async () => {
+  const result = await scenario({pull: {draft: true}, testChecks: ['Test / Test'],
+    review: {state: 'success'}, runRead: () => {throw new Error('Draft must not query Test');}});
+  assert.equal(result.statuses.length, 1);
+  assert.equal(result.statuses[0].state, 'pending');
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.merges, []);
+});
+test('an already-pending ready PR waits without another status write', async () => {
+  const result = await scenario({testChecks: ['Test / Test'], review: {state: 'pending'},
+    runs: [{id: 100, name: 'Test', path: '.github/workflows/test.yml', head_sha: 'head', status: 'in_progress'}]});
+  assert.deepEqual(result.statuses, []);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.merges, []);
+});
+test('a status read failure revokes any previous success before failing Ready', async () => {
+  const result = await scenario({statusError: true, review: {state: 'success'}});
+  assert.equal(result.statuses.at(-1).state, 'pending');
+  assert.match(result.errors[0], /Status unavailable/);
+  assert.deepEqual(result.merges, []);
 });
 test('skipped, failed or absent static checks never authorize publication', async () => {
   for (const checks of [[], [{id: 1, name: 'Check / Check', app: {id: 15368}, conclusion: 'skipped'}],
@@ -282,7 +317,8 @@ test('persistent missing metadata is bounded and API errors revoke old success',
   const missing = await scenario({...trial, runRead: () => {reads++; return [];}});
   assert.equal(reads, 4);
   assert.equal(missing.statuses.at(-1).state, 'pending');
-  const failed = await scenario({...trial, runRead: () => {throw new Error('Metadata unavailable');}});
+  const failed = await scenario({...trial, review: {state: 'success'},
+    runRead: () => {throw new Error('Metadata unavailable');}});
   assert.equal(failed.statuses.at(-1).state, 'pending');
   assert.match(failed.errors[0], /Metadata unavailable/);
 });
