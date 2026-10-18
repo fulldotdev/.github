@@ -16,11 +16,15 @@ on:
         type: boolean
         default: false
       web-timeout-minutes:
-        description: Maximum duration including preview waiting, setup and URL tests.
+        description: Maximum duration for setup and URL tests, after matching previews are ready.
         type: number
         default: 30
       preview-checks:
         description: JSON array of Netlify status contexts; the first is BASE_URL.
+        type: string
+        default: "[]"
+      deployments:
+        description: Optional JSON array of context, production url, Netlify config and base. Uses each build.ignore to select affected previews and verify unchanged builds.
         type: string
         default: "[]"
       node-version-file:
@@ -64,9 +68,163 @@ jobs:
       - name: Unit and service tests
         run: vp run test:unit
 
+  preview:
+    name: Preview
+    if: ${{ !github.event.pull_request.draft && (inputs.http || inputs.browser) }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
+    outputs:
+      base-url: ${{ steps.preview.outputs.base-url }}
+      deploy-urls: ${{ steps.preview.outputs.deploy-urls }}
+      deploy-revisions: ${{ steps.preview.outputs.deploy-revisions }}
+      web-enabled: ${{ steps.preview.outputs.web-enabled }}
+    steps:
+      - name: Read the PR build inputs
+        if: ${{ inputs.deployments != '[]' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve previews for this PR revision
+        id: preview
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PREVIEW_CHECKS: ${{ inputs.preview-checks }}
+          DEPLOYMENTS: ${{ inputs.deployments }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pull = context.payload.pull_request;
+            if (!pull) throw new Error('URL tests require a pull_request event.');
+            const sha = pull.head.sha;
+            const targets = JSON.parse(process.env.DEPLOYMENTS || '[]');
+            if (!Array.isArray(targets)) throw new Error('deployments must be an array.');
+            let names = JSON.parse(process.env.PREVIEW_CHECKS);
+            let selected = [];
+            let changed;
+            let compatible;
+            if (targets.length) {
+              const {execFileSync, spawnSync} = require('node:child_process');
+              const {resolve, sep} = require('node:path');
+              const root = process.env.GITHUB_WORKSPACE;
+              const inside = path => {
+                const absolute = resolve(root, path);
+                if (absolute !== root && !absolute.startsWith(root + sep)) throw new Error('Build paths must stay in the checkout.');
+                return absolute;
+              };
+              const git = args => execFileSync('git', args, {cwd: root, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe']}).trim();
+              const configs = new Map();
+              for (const site of targets) {
+                if (!/^netlify\/[a-z0-9-]+\/deploy-preview$/.test(site.context)
+                  || !/^https:\/\/[a-z0-9.-]+$/.test(site.url) || configs.has(site.context)) {
+                  throw new Error('deployments require unique Netlify contexts and HTTPS production origins.');
+                }
+                const ignore = execFileSync('python3', ['-c',
+                  'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb")).get("build", {}).get("ignore", ""))',
+                  inside(site.config)], {encoding: 'utf8', timeout: 10000}).trim();
+                if (!ignore) throw new Error(`${site.context} needs a build.ignore rule.`);
+                configs.set(site.context, {ignore, cwd: inside(site.base || '.')});
+              }
+              changed = (site, from, to) => {
+                const config = configs.get(site.context);
+                const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', config.ignore], {
+                  cwd: config.cwd, timeout: 10000,
+                  env: {...process.env, CACHED_COMMIT_REF: from, COMMIT_REF: to},
+                });
+                if (![0, 1].includes(result.status)) throw new Error(`${site.context}: build.ignore failed.`);
+                return result.status === 1;
+              };
+              let baseline;
+              try { baseline = git(['merge-base', pull.base.sha, sha]); }
+              catch { core.info('No PR baseline available; test every deployment.'); }
+              // Test changes must exercise the new tests on every declared target.
+              const testChanges = !baseline || git(['diff', '--name-only', baseline, sha, '--', 'tests', '.github/workflows/test.yml']);
+              selected = targets.filter(site => testChanges || changed(site, baseline, sha));
+              names = selected.map(site => site.context);
+              compatible = (site, revision) => {
+                if (!/^[0-9a-f]{40}$/.test(revision || '')) return false;
+                if (revision === sha) return true;
+                try { git(['merge-base', '--is-ancestor', revision, sha]); }
+                catch { return false; }
+                return !changed(site, revision, sha);
+              };
+              core.info(`Affected previews: ${names.join(', ') || 'none'}`);
+              if (!names.length) {
+                core.setOutput('web-enabled', 'false');
+                core.setOutput('deploy-urls', '{}');
+                return;
+              }
+            }
+            if (!Array.isArray(names) || !names.length
+              || names.some(name => typeof name !== 'string' || !/^netlify\/[a-z0-9-]+\/deploy-preview$/.test(name))) {
+              throw new Error('Enabled URL tests require preview-checks.');
+            }
+            async function revisionAt(origin) {
+              try {
+                const response = await fetch(`${origin}/.well-known/build.json?revision=${sha}`, {
+                  headers: {'Cache-Control': 'no-cache'}, redirect: 'error', signal: AbortSignal.timeout(10000),
+                });
+                return response.ok ? (await response.json()).revision : undefined;
+              } catch { return undefined; }
+            }
+            const deadline = Date.now() + 12 * 60 * 1000;
+            while (Date.now() < deadline) {
+              const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: pull.number});
+              if (current.state !== 'open' || current.draft || current.head.sha !== sha) {
+                throw new Error('PR changed or returned to draft; discard this test run.');
+              }
+              const {data} = await github.rest.repos.getCombinedStatusForRef({owner, repo, ref: sha, per_page: 100});
+              const urls = {};
+              const revisions = {};
+              await Promise.all(names.map(async name => {
+                const status = data.statuses.find(status => status.context === name);
+                if (['error', 'failure'].includes(status?.state)) {
+                  throw new Error(`${name} failed for ${sha}.`);
+                }
+                if (status?.state !== 'success') return;
+                const url = new URL(status.target_url);
+                const site = name.split('/')[1];
+                const origin = `https://deploy-preview-${pull.number}--${site}.netlify.app`;
+                const built = url.origin === origin;
+                const skipped = targets.length && url.hostname === 'app.netlify.com'
+                  && /^\/(?:sites|projects)\/[^/]+\/deploys\/[^/]+\/?$/.test(url.pathname);
+                if (url.protocol !== 'https:' || url.username || url.password || !(built || skipped)) {
+                  throw new Error(`${name} did not return this PR's Netlify preview URL.`);
+                }
+                if (!targets.length) { urls[name] = origin; return; }
+                const target = selected.find(site => site.context === name);
+                const revision = await revisionAt(origin);
+                if (built ? revision === sha : compatible(target, revision)) {
+                  urls[name] = origin;
+                  revisions[origin] = revision;
+                } else if (skipped && target['production-fallback'] === true) {
+                  // Static websites may have no first preview when their build was skipped.
+                  // Signed-in apps must always use their isolated preview.
+                  const production = await revisionAt(target.url);
+                  if (compatible(target, production)) {
+                    urls[name] = target.url;
+                    revisions[target.url] = production;
+                  }
+                }
+              }));
+              if (names.every(name => urls[name])) {
+                core.setOutput('base-url', urls[names[0]]);
+                core.setOutput('deploy-urls', JSON.stringify(urls));
+                core.setOutput('deploy-revisions', JSON.stringify(revisions));
+                core.setOutput('sha', sha);
+                core.setOutput('web-enabled', 'true');
+                return;
+              }
+              core.info(`Waiting for matching previews: ${names.filter(name => !urls[name]).join(', ')}`);
+              await new Promise(resolve => setTimeout(resolve, 15000));
+            }
+            throw new Error('Matching previews did not complete within 12 minutes.');
+
   web:
     name: Web
-    if: ${{ !github.event.pull_request.draft && (inputs.http || inputs.browser) }}
+    needs: preview
+    if: ${{ !github.event.pull_request.draft && needs.preview.outputs.web-enabled == 'true' }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: ${{ inputs.web-timeout-minutes }}
     # Signed-in tests can share preview accounts across browser targets and PRs.
@@ -95,66 +253,39 @@ jobs:
       - name: Install desktop browsers
         if: ${{ inputs.browser }}
         run: vp exec playwright install --with-deps chromium firefox webkit
-      - name: Resolve previews for this PR revision
-        id: preview
+      - name: Confirm the PR still matches the tested revision
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
-          PREVIEW_CHECKS: ${{ inputs.preview-checks }}
+          DEPLOY_REVISIONS: ${{ needs.preview.outputs.deploy-revisions }}
         with:
           script: |
             const {owner, repo} = context.repo;
             const pull = context.payload.pull_request;
-            if (!pull) throw new Error('URL tests require a pull_request event.');
-            const names = JSON.parse(process.env.PREVIEW_CHECKS);
-            if (!Array.isArray(names) || !names.length
-              || names.some(name => typeof name !== 'string' || !/^netlify\/[a-z0-9-]+\/deploy-preview$/.test(name))) {
-              throw new Error('Enabled URL tests require preview-checks.');
+            const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: pull.number});
+            if (current.state !== 'open' || current.draft || current.head.sha !== pull.head.sha) {
+              throw new Error('PR changed or returned to draft; discard this test run.');
             }
-            const sha = pull.head.sha;
-            const deadline = Date.now() + 12 * 60 * 1000;
-            while (Date.now() < deadline) {
-              const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: pull.number});
-              if (current.state !== 'open' || current.draft || current.head.sha !== sha) {
-                throw new Error('PR changed or returned to draft; discard this test run.');
+            const revisions = JSON.parse(process.env.DEPLOY_REVISIONS || '{}');
+            await Promise.all(Object.entries(revisions).map(async ([origin, revision]) => {
+              const response = await fetch(`${origin}/.well-known/build.json?revision=${pull.head.sha}`, {
+                headers: {'Cache-Control': 'no-cache'}, redirect: 'error', signal: AbortSignal.timeout(10000),
+              });
+              if (!response.ok || (await response.json()).revision !== revision) {
+                throw new Error(`${origin} changed while Web waited; rerun Test to verify its build inputs.`);
               }
-              const {data} = await github.rest.repos.getCombinedStatusForRef({owner, repo, ref: sha, per_page: 100});
-              const urls = {};
-              for (const name of names) {
-                const status = data.statuses.find(status => status.context === name);
-                if (['error', 'failure'].includes(status?.state)) {
-                  throw new Error(`${name} failed for ${sha}.`);
-                }
-                if (status?.state !== 'success') continue;
-                const url = new URL(status.target_url);
-                const site = name.split('/')[1];
-                if (url.protocol !== 'https:' || url.username || url.password
-                  || url.hostname !== `deploy-preview-${pull.number}--${site}.netlify.app`) {
-                  throw new Error(`${name} did not return this PR's Netlify preview URL.`);
-                }
-                urls[name] = url.origin;
-              }
-              if (names.every(name => urls[name])) {
-                core.setOutput('base-url', urls[names[0]]);
-                core.setOutput('deploy-urls', JSON.stringify(urls));
-                core.setOutput('sha', sha);
-                return;
-              }
-              core.info(`Waiting for matching previews: ${names.filter(name => !urls[name]).join(', ')}`);
-              await new Promise(resolve => setTimeout(resolve, 15000));
-            }
-            throw new Error('Matching previews did not complete within 12 minutes.');
+            }));
       - name: HTTP tests
         if: ${{ inputs.http }}
         env:
-          BASE_URL: ${{ steps.preview.outputs.base-url }}
-          QA_DEPLOY_URLS: ${{ steps.preview.outputs.deploy-urls }}
+          BASE_URL: ${{ needs.preview.outputs.base-url }}
+          QA_DEPLOY_URLS: ${{ needs.preview.outputs.deploy-urls }}
         run: vp run test:http
       - name: Browser tests
         id: browser
         if: ${{ inputs.browser }}
         env:
-          BASE_URL: ${{ steps.preview.outputs.base-url }}
-          QA_DEPLOY_URLS: ${{ steps.preview.outputs.deploy-urls }}
+          BASE_URL: ${{ needs.preview.outputs.base-url }}
+          QA_DEPLOY_URLS: ${{ needs.preview.outputs.deploy-urls }}
           TESTING_SECRET: ${{ secrets.testing-secret }}
         # A virtual display on Linux, for repositories that run a browser headed.
         shell: bash
@@ -176,7 +307,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() && !github.event.pull_request.draft }}
-    needs: [unit, web]
+    needs: [unit, preview, web]
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 2
     steps:
@@ -184,14 +315,24 @@ jobs:
         env:
           UNIT_ENABLED: ${{ inputs.unit }}
           WEB_ENABLED: ${{ inputs.http || inputs.browser }}
+          WEB_SELECTED: ${{ needs.preview.outputs.web-enabled }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          PREVIEW_RESULT: ${{ needs.preview.result }}
           WEB_RESULT: ${{ needs.web.result }}
         run: |
           if [[ "$UNIT_ENABLED" == true && "$UNIT_RESULT" != success ]]; then
             echo 'Enabled unit tests did not succeed.' >&2
             exit 1
           fi
-          if [[ "$WEB_ENABLED" == true && "$WEB_RESULT" != success ]]; then
+          if [[ "$WEB_ENABLED" == true && "$PREVIEW_RESULT" != success ]]; then
+            echo 'Required previews did not succeed.' >&2
+            exit 1
+          fi
+          if [[ "$WEB_ENABLED" == true && "$WEB_SELECTED" != true && "$WEB_SELECTED" != false ]]; then
+            echo 'Preview selection did not complete.' >&2
+            exit 1
+          fi
+          if [[ "$WEB_ENABLED" == true && "$WEB_SELECTED" == true && "$WEB_RESULT" != success ]]; then
             echo 'Enabled URL tests did not succeed.' >&2
             exit 1
           fi
