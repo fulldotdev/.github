@@ -9,6 +9,10 @@ on:
       command:
         type: string
         default: vp run check:source
+      test-command:
+        description: Optional unit and service tests, using the same installation after checks.
+        type: string
+        default: ""
       install:
         type: boolean
         default: true
@@ -48,3 +52,8 @@ jobs:
         env:
           CHECK_COMMAND: ${{ inputs.command }}
         run: bash -e -o pipefail -c "$CHECK_COMMAND"
+      - name: Unit and service tests
+        if: ${{ inputs.test-command != '' }}
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: bash -e -o pipefail -c "$TEST_COMMAND"
