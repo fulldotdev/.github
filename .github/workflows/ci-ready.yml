@@ -3,7 +3,7 @@ name: Ready
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_run:
     workflows: [Check]
     types: [completed]
