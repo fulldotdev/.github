@@ -78,6 +78,23 @@ jobs:
       pnpm_config_ignore_pnpmfile: "true"
       QA_PROFILE: preview
     steps:
+      - name: Checkout the tested preview revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
+        with:
+          version: "1.1.0"
+          node-version-file: ${{ inputs.node-version-file }}
+          cache: true
+          run-install: |
+            args:
+              - --frozen-lockfile
+              - --ignore-scripts
+      - name: Install desktop browsers
+        if: ${{ inputs.browser }}
+        run: vp exec playwright install --with-deps chromium firefox webkit
       - name: Resolve previews for this PR revision
         id: preview
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
@@ -126,29 +143,12 @@ jobs:
               await new Promise(resolve => setTimeout(resolve, 15000));
             }
             throw new Error('Matching previews did not complete within 12 minutes.');
-      - name: Checkout the tested preview revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ steps.preview.outputs.sha }}
-          persist-credentials: false
-      - uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
-        with:
-          version: "1.1.0"
-          node-version-file: ${{ inputs.node-version-file }}
-          cache: true
-          run-install: |
-            args:
-              - --frozen-lockfile
-              - --ignore-scripts
       - name: HTTP tests
         if: ${{ inputs.http }}
         env:
           BASE_URL: ${{ steps.preview.outputs.base-url }}
           QA_DEPLOY_URLS: ${{ steps.preview.outputs.deploy-urls }}
         run: vp run test:http
-      - name: Install desktop browsers
-        if: ${{ inputs.browser }}
-        run: vp exec playwright install --with-deps chromium firefox webkit
       - name: Browser tests
         id: browser
         if: ${{ inputs.browser }}

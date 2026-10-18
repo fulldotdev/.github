@@ -10,9 +10,13 @@ on:
         type: string
         required: true
       revision:
-        description: Commit confirmed as published before dispatching this workflow.
+        description: Full commit SHA to test after deployment; requires prior confirmation if deployments is empty.
         type: string
         required: true
+      deployments:
+        description: Optional JSON array of production origins and their Netlify config/base paths. Waits for this revision or unchanged build inputs.
+        type: string
+        default: "[]"
       http:
         type: boolean
         default: true
@@ -27,7 +31,7 @@ jobs:
   live:
     name: Live
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       pnpm_config_ignore_scripts: "true"
       pnpm_config_ignore_pnpmfile: "true"
@@ -37,6 +41,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.revision }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
         with:
@@ -47,12 +52,82 @@ jobs:
             args:
               - --frozen-lockfile
               - --ignore-scripts
-      - name: Safe live HTTP smoke
-        if: ${{ inputs.http }}
-        run: vp run test:http
       - name: Install desktop browsers
         if: ${{ inputs.browser }}
         run: vp exec playwright install --with-deps chromium firefox webkit
+      - name: Wait for the published production revision
+        if: ${{ inputs.deployments != '[]' }}
+        env:
+          DEPLOYMENTS: ${{ inputs.deployments }}
+          REVISION: ${{ inputs.revision }}
+        shell: python
+        run: |
+          import concurrent.futures
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+          import tomllib
+          import urllib.request
+
+          revision = os.environ["REVISION"]
+          sites = json.loads(os.environ["DEPLOYMENTS"])
+          if not re.fullmatch(r"[0-9a-f]{40}", revision) or not isinstance(sites, list) or not sites:
+              raise ValueError("Production tests require a full revision and deployment targets.")
+          for site in sites:
+              if not re.fullmatch(r"https://[a-z0-9.-]+", site["url"]):
+                  raise ValueError("Production targets must be HTTPS origins.")
+
+          def published(site):
+              try:
+                  request = urllib.request.Request(
+                      site["url"] + "/.well-known/build.json?revision=" + revision,
+                      headers={"Cache-Control": "no-cache"},
+                  )
+                  with urllib.request.urlopen(request, timeout=10) as response:
+                      deployed = json.load(response)["revision"]
+              except (OSError, ValueError, KeyError, TypeError):
+                  return False
+              if not isinstance(deployed, str) or not re.fullmatch(r"[0-9a-f]{40}", deployed):
+                  return False
+              if deployed == revision:
+                  return True
+              ancestor = subprocess.run(
+                  ["git", "merge-base", "--is-ancestor", deployed, revision],
+                  capture_output=True,
+              )
+              if ancestor.returncode:
+                  return False
+              # Reuse Netlify's own decision, including its working directory.
+              # An older deploy is valid only when these build inputs did not change.
+              with open(site.get("config", "netlify.toml"), "rb") as config:
+                  ignore = tomllib.load(config).get("build", {}).get("ignore")
+              if not ignore:
+                  return False
+              result = subprocess.run(
+                  ["bash", "-e", "-o", "pipefail", "-c", ignore],
+                  cwd=site.get("base", "."),
+                  env={**os.environ, "CACHED_COMMIT_REF": deployed, "COMMIT_REF": revision},
+                  timeout=10,
+              )
+              if result.returncode not in (0, 1):
+                  raise RuntimeError("Netlify's build ignore command failed for " + site["url"])
+              return result.returncode == 0
+
+          deadline = time.monotonic() + 12 * 60
+          pending = sites
+          with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+              while pending and time.monotonic() < deadline:
+                  pending = [site for site, ready in zip(pending, pool.map(published, pending)) if not ready]
+                  if pending:
+                      print("Waiting for production: " + ", ".join(site["url"] for site in pending), flush=True)
+                      time.sleep(15)
+          if pending:
+              raise RuntimeError("Matching production deploys did not complete within 12 minutes.")
+      - name: Safe live HTTP smoke
+        if: ${{ inputs.http }}
+        run: vp run test:http
       - name: Safe live browser smoke
         if: ${{ inputs.browser }}
         # A virtual display on Linux, for repositories that run a browser headed.

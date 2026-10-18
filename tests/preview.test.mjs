@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import test from 'node:test';
 
 const source = readFileSync(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8')
-  .split('          script: |\n')[1].split('\n      - name: Checkout')[0]
+  .split('          script: |\n')[1].split('\n      - name: HTTP tests')[0]
   .split('\n').map(line => line.slice(12)).join('\n');
 const execute = new (Object.getPrototypeOf(async function () {}).constructor)(
   'github', 'context', 'core', 'process', 'Date', 'setTimeout', source);
