@@ -1,12 +1,30 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
+import {spawnSync} from 'node:child_process';
 
 const source = readFileSync(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8')
-  .split('          script: |\n')[1].split('\n      - name: HTTP tests')[0]
+  .split('          script: |\n')[1].split('\n  web:')[0]
   .split('\n').map(line => line.slice(12)).join('\n');
 const execute = new (Object.getPrototypeOf(async function () {}).constructor)(
   'github', 'context', 'core', 'process', 'Date', 'setTimeout', source);
+
+const recheckSource = readFileSync(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8')
+  .split('      - name: Confirm the PR still matches the tested revision\n')[1]
+  .split('          script: |\n')[1].split('\n      - name: HTTP tests')[0]
+  .split('\n').map(line => line.slice(12)).join('\n');
+const recheck = new (Object.getPrototypeOf(async function () {}).constructor)(
+  'github', 'context', recheckSource);
+
+test('URL tests reject a PR changed while the Web job waited for its lock', async () => {
+  const pull = {number: 7, state: 'open', draft: false, head: {sha: 'tested-head'}};
+  const context = {repo: {owner: 'o', repo: 'r'}, payload: {pull_request: pull}};
+  const github = current => ({rest: {pulls: {get: async () => ({data: current})}}});
+  await recheck(github(pull), context);
+  for (const changes of [{draft: true}, {state: 'closed'}, {head: {sha: 'new-head'}}]) {
+    await assert.rejects(() => recheck(github({...pull, ...changes}), context), /PR changed/);
+  }
+});
 
 async function scenario(options = {}) {
   const pull = {number: 7, state: 'open', draft: false, head: {sha: 'tested-head'}};
@@ -61,4 +79,24 @@ test('production, another PR and untrusted URLs are rejected', async () => {
       /did not return this PR/);
   }
   await assert.rejects(scenario({names: []}), /require preview-checks/);
+});
+
+// Exercise the actual aggregate with upstream outcomes: skipped prerequisites
+// must never turn an enabled URL suite into a successful merge gate.
+const gate = readFileSync(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8')
+  .split('      - name: Require every enabled category\n')[1].split('        run: |\n')[1]
+  .split('\n').map(line => line.slice(10)).join('\n');
+function aggregate(overrides = {}) {
+  return spawnSync('bash', ['-e', '-c', gate], {env: {...process.env,
+    UNIT_ENABLED: 'false', WEB_ENABLED: 'true', UNIT_RESULT: 'skipped',
+    PREVIEW_RESULT: 'success', WEB_RESULT: 'success', ...overrides}}).status;
+}
+test('enabled URL tests require successful preview and Web jobs', () => {
+  assert.equal(aggregate(), 0);
+  for (const result of ['skipped', 'failure', 'cancelled']) {
+    assert.notEqual(aggregate({PREVIEW_RESULT: result}), 0);
+    assert.notEqual(aggregate({WEB_RESULT: result}), 0);
+  }
+  assert.equal(aggregate({WEB_ENABLED: 'false', PREVIEW_RESULT: 'skipped', WEB_RESULT: 'skipped'}), 0);
+  assert.notEqual(aggregate({UNIT_ENABLED: 'true'}), 0);
 });
