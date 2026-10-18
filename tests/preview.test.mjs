@@ -59,7 +59,8 @@ async function scenario(options = {}) {
     {info() {}, setOutput: (name, value) => { outputs[name] = value; }},
     {env: {...process.env, PREVIEW_CHECKS: JSON.stringify(names), DEPLOYMENTS: JSON.stringify(options.targets ?? []), GITHUB_WORKSPACE: options.root}},
     {now: () => clock}, callback => { clock += 60 * 1000; callback(); },
-    createRequire(import.meta.url), async url => ({ok: true, json: async () => ({revision: options.revisions?.[new URL(url).origin] ?? options.head})}));
+    createRequire(import.meta.url), async url => ({ok: !options.missingMarker,
+      json: async () => ({revision: options.revisions?.[new URL(url).origin] ?? pull.head.sha})}));
   return {outputs, refs};
 }
 
@@ -69,6 +70,15 @@ test('URL tests use previews associated with the exact PR head', async () => {
   assert.equal(outputs.sha, 'tested-head');
   assert.equal(outputs['base-url'], 'https://deploy-preview-7--app.netlify.app');
   assert.equal(Object.keys(JSON.parse(outputs['deploy-urls'])).length, 2);
+  assert.deepEqual(JSON.parse(outputs['deploy-revisions']), {
+    'https://deploy-preview-7--app.netlify.app': 'tested-head',
+    'https://deploy-preview-7--site.netlify.app': 'tested-head',
+  });
+});
+
+test('single-site previews require the served build to match the PR head', async () => {
+  await assert.rejects(scenario({revisions: {[appAlias]: 'another-head'}}), /within 12 minutes/);
+  await assert.rejects(scenario({missingMarker: true}), /within 12 minutes/);
 });
 
 test('failed, absent and pending previews cannot become passing URL tests', async () => {

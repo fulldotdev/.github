@@ -192,9 +192,15 @@ jobs:
                 if (url.protocol !== 'https:' || url.username || url.password || !(built || skipped)) {
                   throw new Error(`${name} did not return this PR's Netlify preview URL.`);
                 }
-                if (!targets.length) { urls[name] = origin; return; }
-                const target = selected.find(site => site.context === name);
                 const revision = await revisionAt(origin);
+                if (!targets.length) {
+                  if (revision === sha) {
+                    urls[name] = origin;
+                    revisions[origin] = revision;
+                  }
+                  return;
+                }
+                const target = selected.find(site => site.context === name);
                 if (built ? revision === sha : compatible(target, revision)) {
                   urls[name] = origin;
                   revisions[origin] = revision;
