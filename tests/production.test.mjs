@@ -1,9 +1,39 @@
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
-import {spawnSync} from 'node:child_process';
+import {mkdtempSync, readFileSync, rmSync} from 'node:fs';
+import {execFileSync, spawnSync} from 'node:child_process';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import test from 'node:test';
 
+test('live credentials cannot reach a feature commit or an invalid revision', () => {
+  const guard = readFileSync(new URL('../.github/workflows/test-live.yml', import.meta.url), 'utf8')
+    .split('      - name: Confirm the revision belongs to the default branch\n')[1]
+    .split('        run: |\n')[1].split('\n      - uses:')[0]
+    .split('\n').map(line => line.slice(10)).join('\n');
+  const cwd = mkdtempSync(join(tmpdir(), 'production-revision-'));
+  const git = (...args) => execFileSync('git', args, {cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+  try {
+    git('init', '--initial-branch=main');
+    const commit = message => git('-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '--allow-empty', '-m', message);
+    commit('production');
+    const main = git('rev-parse', 'HEAD');
+    git('update-ref', 'refs/remotes/origin/main', main);
+    commit('unmerged feature');
+    const feature = git('rev-parse', 'HEAD');
+    const check = revision => spawnSync('bash', ['-e', '-o', 'pipefail', '-c', guard], {
+      cwd, env: {...process.env, REVISION: revision, DEFAULT_BRANCH: 'main'}, encoding: 'utf8',
+    });
+    assert.equal(check(main).status, 0);
+    assert.notEqual(check(feature).status, 0);
+    assert.notEqual(check('HEAD').status, 0);
+    assert.notEqual(check('invalid; exit 0').status, 0);
+  } finally {
+    rmSync(cwd, {recursive: true, force: true});
+  }
+});
+
 const source = readFileSync(new URL('../.github/workflows/test-live.yml', import.meta.url), 'utf8')
+  .split('      - name: Wait for the published production revision\n')[1]
   .split('        run: |\n')[1].split('\n      - name: Safe live HTTP smoke')[0]
   .split('\n').map(line => line.slice(10)).join('\n').split('deadline =')[0];
 
