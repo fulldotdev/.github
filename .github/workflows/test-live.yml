@@ -30,7 +30,7 @@ permissions:
 jobs:
   live:
     name: Live
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || inputs.runner }}
     timeout-minutes: 30
     env:
       pnpm_config_ignore_scripts: "true"

@@ -47,7 +47,7 @@ jobs:
   unit:
     name: Unit
     if: ${{ !github.event.pull_request.draft && inputs.unit }}
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || inputs.runner }}
     timeout-minutes: 20
     env:
       pnpm_config_ignore_scripts: "true"
@@ -71,7 +71,7 @@ jobs:
   preview:
     name: Preview
     if: ${{ !github.event.pull_request.draft && (inputs.http || inputs.browser) }}
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || inputs.runner }}
     timeout-minutes: 15
     outputs:
       base-url: ${{ steps.preview.outputs.base-url }}
@@ -231,7 +231,7 @@ jobs:
     name: Web
     needs: preview
     if: ${{ !github.event.pull_request.draft && needs.preview.outputs.web-enabled == 'true' }}
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || inputs.runner }}
     timeout-minutes: ${{ inputs.web-timeout-minutes }}
     # Signed-in tests can share preview accounts across browser targets and PRs.
     concurrency:
@@ -314,7 +314,7 @@ jobs:
     name: Test
     if: ${{ always() && !github.event.pull_request.draft }}
     needs: [unit, preview, web]
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || inputs.runner }}
     timeout-minutes: 2
     steps:
       - name: Require every enabled category

@@ -36,7 +36,7 @@ concurrency:
 jobs:
   ready:
     name: Ready
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || inputs.runner }}
     timeout-minutes: 3
     steps:
       - name: Create merge token for repositories with release workflows

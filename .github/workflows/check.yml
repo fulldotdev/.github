@@ -27,7 +27,7 @@ jobs:
   check:
     name: Check
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || inputs.runner }}
     timeout-minutes: 15
     env:
       pnpm_config_ignore_scripts: "true"

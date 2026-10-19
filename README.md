@@ -4,6 +4,8 @@ Organization-wide GitHub defaults and reusable workflows. Repositories own their
 
 Callers pin a full commit SHA from `main` after the shared workflow PR is merged.
 
+Shared Linux jobs use GitHub's `ubuntu-24.04` for public repositories and the caller's Blacksmith runner for private repositories. To switch a project, set the repository Actions variable `CI_RUNNER` to `ubuntu-24.04` or a Blacksmith Linux runner label in GitHub's Settings → Secrets and variables → Actions → Variables. Clearing it restores the default. Commands, checks and browser coverage stay the same; native macOS jobs keep their own runners. This requires callers pinned to a revision that supports `CI_RUNNER`.
+
 New projects take their callers from [astro-template](https://github.com/fulldotdev/astro-template) or [vite-template](https://github.com/fulldotdev/vite-template).
 
 - **Explore** experiments locally; **Implement** builds the requested change locally.
