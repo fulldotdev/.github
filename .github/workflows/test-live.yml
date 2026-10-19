@@ -23,6 +23,11 @@ on:
       browser:
         type: boolean
         default: true
+    secrets:
+      live-test-email:
+        required: false
+      live-test-password:
+        required: false
 
 permissions:
   contents: read
@@ -43,6 +48,14 @@ jobs:
           ref: ${{ inputs.revision }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Confirm the revision belongs to the default branch
+        env:
+          REVISION: ${{ inputs.revision }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$REVISION" "refs/remotes/origin/$DEFAULT_BRANCH"
       - uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
         with:
           version: "1.1.0"
@@ -130,6 +143,9 @@ jobs:
         run: vp run test:http
       - name: Safe live browser smoke
         if: ${{ inputs.browser }}
+        env:
+          LIVE_TEST_EMAIL: ${{ secrets.live-test-email }}
+          LIVE_TEST_PASSWORD: ${{ secrets.live-test-password }}
         # A virtual display on Linux, for repositories that run a browser headed.
         shell: bash
         run: |
