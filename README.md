@@ -4,6 +4,8 @@ Organization-wide GitHub defaults and reusable workflows. Repositories own their
 
 Callers pin a full commit SHA from `main` after the shared workflow PR is merged.
 
+Shared Linux jobs use GitHub's `ubuntu-24.04` for public repositories and the caller's Blacksmith runner for private repositories. To switch a project, set the repository Actions variable `CI_RUNNER` to `ubuntu-24.04` or a Blacksmith Linux runner label in GitHub's Settings → Secrets and variables → Actions → Variables. Clearing it restores the default. Commands, checks and browser coverage stay the same; native macOS jobs keep their own runners. This requires callers pinned to a revision that supports `CI_RUNNER`.
+
 New projects take their callers from [astro-template](https://github.com/fulldotdev/astro-template) or [vite-template](https://github.com/fulldotdev/vite-template).
 
 - **Explore** experiments locally; **Implement** builds the requested change locally.
@@ -27,6 +29,6 @@ Repositories with `test.yml` require `Test / Test` through the existing `Review`
 
 The Ready caller grants `actions: read` so the gate reads the current Test workflow attempt and its jobs, including reruns.
 
-Organization rules require `Check / Check` and `Review`, without requiring synchronization with main. Netlify requirements are managed centrally for repositories with those sites. Live URL tests run after deployment, outside the build command; signed-in tests and writes stay on previews.
+Organization rules require `Check / Check` and `Review`, without requiring synchronization with main. Netlify requirements are managed centrally for repositories with those sites. Live URL tests run after deployment, outside the build command. Product scenarios and fixture writes stay on previews. A repository may pass `live-test-email` and `live-test-password` only from its trusted main workflow for one ordinary login/read/sign-out smoke with its own limited account; browser recordings and signed-in artifacts stay off.
 
 Keep repository auto-merge disabled except for CloudCannon publishers. CloudCannon's Publish button keeps automatic publication for same-repository `preview` PRs created by `cloudcannon[bot]`, with all required checks and previews. Code PRs are merged by their agent.
