@@ -139,14 +139,23 @@ jobs:
                 if (completedRunPending) throw new Error('Successful Test metadata is still incomplete. Rerun Ready to reconcile it.');
                 return false;
               }
+              // Every Netlify preview of the revision built, so no organization rule names a site.
+              async function previewsPassed() {
+                const names = JSON.parse(process.env.NETLIFY_CHECKS || '[]');
+                if (!names.length) return true;
+                const {data} = await github.rest.repos.getCombinedStatusForRef({owner, repo, ref: sha, per_page: 100});
+                return names.every(name => data.statuses.find(status => status.context === name)?.state === 'success');
+              }
               const approved = await testsPassed();
+              const previews = await previewsPassed();
               const current = await getPull();
               if (current.state !== 'open' || current.base.ref !== pull.base.ref
                 || current.head.sha !== sha || current.draft !== pull.draft) return;
-              const reviewPassed = !pull.draft && approved && await testsPassed();
+              const reviewPassed = !pull.draft && approved && previews && await testsPassed();
               await setReview(reviewPassed ? 'success' : 'pending', reviewPassed
                 ? 'Ready requirements passed for this revision.'
-                : 'Waiting for required tests of this revision.');
+                : previews ? 'Waiting for required tests of this revision.'
+                  : 'Waiting for the Netlify previews of this revision.');
               if (!reviewPassed) return;
               // Agents own code merges so they can follow the production deployment.
               // Keep the customer's CloudCannon Publish button automatic.
@@ -169,9 +178,8 @@ jobs:
                 {owner, repo, branch: pull.base.ref});
               const required = rules.filter(rule => rule.type === 'required_status_checks')
                 .flatMap(rule => rule.parameters.required_status_checks.map(status => status.context));
-              const expected = [process.env.CHECK_NAME, 'Review', ...JSON.parse(process.env.NETLIFY_CHECKS)];
-              if (!expected.every(name => required.includes(name))) {
-                return core.info('The complete central Check, Review and Netlify requirements are not active yet.');
+              if (![process.env.CHECK_NAME, 'Review'].every(name => required.includes(name))) {
+                return core.info('The central Check and Review requirements are not active yet.');
               }
               if (!repository.allow_auto_merge) return core.info('Repository auto-merge is not enabled yet.');
               const final = await getPull();

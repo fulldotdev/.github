@@ -30,7 +30,8 @@ async function scenario(options = {}) {
       repos: {get: async () => ({data: {default_branch: 'main', full_name: 'o/r', allow_auto_merge: options.autoMerge !== false}}),
         getCombinedStatusForRef: async () => {
           if (options.statusError) throw new Error('Status unavailable');
-          return {data: {statuses: options.review ? [{context: 'Review', ...options.review}] : []}};
+          return {data: {statuses: [...options.review ? [{context: 'Review', ...options.review}] : [],
+            ...options.previews ?? (options.netlify ?? []).map(context => ({context, state: 'success'}))]}};
         },
         createCommitStatus: async status => statuses.push(status)},
       checks: {listForRef: 'checks'},
@@ -143,10 +144,17 @@ test('unrequired failures do not strand an otherwise eligible PR', async () => {
   assert.equal(denied.merges.length, 0);
   assert.match(denied.errors[0], /Head changed/);
 });
-test('every expected Netlify context must be centrally required', async () => {
-  const result = await scenario({netlify: ['netlify/app/deploy-preview', 'netlify/site/deploy-preview'],
-    required: ['Check / Check', 'Review', 'netlify/app/deploy-preview']});
-  assert.equal(result.merges.length, 0);
+test('Review waits for every Netlify preview of the revision', async () => {
+  const netlify = ['netlify/app/deploy-preview', 'netlify/site/deploy-preview'];
+  for (const state of ['pending', 'failure', undefined]) {
+    const previews = [{context: netlify[0], state: 'success'}, ...state ? [{context: netlify[1], state}] : []];
+    const result = await scenario({netlify, previews});
+    assert.equal(result.statuses.at(-1).state, 'pending');
+    assert.equal(result.merges.length, 0);
+  }
+  const passed = await scenario({netlify, required: ['Check / Check', 'Review']});
+  assert.equal(passed.statuses.at(-1).state, 'success');
+  assert.equal(passed.merges.length, 1);
 });
 test('every event reconciles other open PRs, even when concurrency coalesces events', async () => {
   const pulls = [1, 2].map(number => ({number, node_id: `PR${number}`, state: 'open', draft: false,
