@@ -28,8 +28,9 @@ async function scenario(options = {}) {
       pulls: {get: async ({pull_number}) => ({data: ++reads >= 2 && options.changed ? {...pull, head: {sha: 'new'}} : pulls.find(candidate => candidate.number === pull_number)}),
         list: 'pulls', merge: async args => { if (options.rejectPull === args.pull_number) throw Object.assign(new Error('Head changed'), {status: 409}); merges.push(args); }},
       repos: {get: async () => ({data: {default_branch: 'main', full_name: 'o/r', allow_auto_merge: options.autoMerge !== false}}),
-        getCombinedStatusForRef: async () => {
+        getCombinedStatusForRef: async ({ref}) => {
           if (options.statusError) throw new Error('Status unavailable');
+          assert.equal(ref, 'head', 'Statuses are read for the PR head');
           return {data: {statuses: [...options.review ? [{context: 'Review', ...options.review}] : [],
             ...options.previews ?? (options.netlify ?? []).map(context => ({context, state: 'success'}))]}};
         },
