@@ -30,7 +30,7 @@ async function scenario(options = {}) {
       repos: {get: async () => ({data: {default_branch: 'main', full_name: 'o/r', allow_auto_merge: options.autoMerge !== false}}),
         getCombinedStatusForRef: async ({ref}) => {
           if (options.statusError) throw new Error('Status unavailable');
-          assert.equal(ref, 'head', 'Statuses are read for the PR head');
+          assert.ok(pulls.some(candidate => candidate.head.sha === ref), 'Statuses are read for a PR head');
           return {data: {statuses: [...options.review ? [{context: 'Review', ...options.review}] : [],
             ...options.previews ?? (options.netlify ?? []).map(context => ({context, state: 'success'}))]}};
         },
