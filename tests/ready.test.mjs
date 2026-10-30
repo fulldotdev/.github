@@ -311,6 +311,14 @@ test('the exact latest Test attempt supplies every required successful job', asy
   assert.equal(result.statuses.at(-1).state, 'success');
 });
 
+test('an unchanged successful Review is not written again on later events', async () => {
+  // GitHub refuses more than 1000 statuses per commit and context.
+  const result = await scenario({...trial, runs: [testRun], jobs: [testJob],
+    review: {state: 'success', description: 'Ready requirements passed for this revision.'}});
+  assert.deepEqual(result.statuses, []);
+  assert.deepEqual(result.errors, []);
+});
+
 test('completion retries metadata lag and passes without requiring another event', async () => {
   let jobReads = 0;
   const result = await scenario({...trial,
