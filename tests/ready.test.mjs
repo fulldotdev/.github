@@ -311,12 +311,22 @@ test('the exact latest Test attempt supplies every required successful job', asy
   assert.equal(result.statuses.at(-1).state, 'success');
 });
 
-test('an unchanged successful Review is not written again on later events', async () => {
+test('other PRs\' events do not rewrite an unchanged successful Review', async () => {
   // GitHub refuses more than 1000 statuses per commit and context.
-  const result = await scenario({...trial, runs: [testRun], jobs: [testJob],
-    review: {state: 'success', description: 'Ready requirements passed for this revision.'}});
-  assert.deepEqual(result.statuses, []);
-  assert.deepEqual(result.errors, []);
+  const passed = {...trial, runs: [testRun], jobs: [testJob],
+    review: {state: 'success', description: 'Ready requirements passed for this revision.'}};
+  for (const event of [{pull_request: {number: 2}}, {workflow_run: {name: 'Check', head_sha: 'other'}}, {sha: 'other'}]) {
+    const result = await scenario({...passed, event});
+    assert.deepEqual(result.statuses, []);
+    assert.deepEqual(result.errors, []);
+  }
+  // The PR's own events still block the old success before checking.
+  const own = await scenario(passed);
+  assert.deepEqual(own.statuses.map(status => status.state), ['pending', 'success']);
+});
+test('a PR changing while it is checked loses its old success', async () => {
+  const result = await scenario({changed: true, review: {state: 'success'}, event: {pull_request: {number: 2}}});
+  assert.deepEqual(result.statuses.map(status => status.state), ['pending']);
 });
 
 test('completion retries metadata lag and passes without requiring another event', async () => {
