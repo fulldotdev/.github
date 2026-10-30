@@ -100,7 +100,13 @@ jobs:
                 await setReview('pending', 'Draft: publication is not authorized.');
                 return;
               }
-              if (requiredTests.length) await setReview('pending', 'Checking the current Test run and attempt.');
+              // Every event reconciles every open PR, and GitHub refuses more than 1000
+              // statuses per commit and context. Block an old success before checking
+              // only when the event concerns this PR, such as a Test rerun of its head.
+              const {payload} = context;
+              const ownEvent = payload.pull_request?.number === number
+                || payload.workflow_run?.head_sha === sha || payload.sha === sha;
+              if (requiredTests.length && ownEvent) await setReview('pending', 'Checking the current Test run and attempt.');
               async function testsPassed() {
                 if (!requiredTests.length) return true;
                 // Read the current run and attempt on every event. Check runs can
@@ -146,12 +152,23 @@ jobs:
                 const {data} = await github.rest.repos.getCombinedStatusForRef({owner, repo, ref: sha, per_page: 100});
                 return names.every(name => data.statuses.find(status => status.context === name)?.state === 'success');
               }
-              const approved = await testsPassed();
-              const previews = await previewsPassed();
-              const current = await getPull();
-              if (current.state !== 'open' || current.base.ref !== pull.base.ref
-                || current.head.sha !== sha || current.draft !== pull.draft) return;
-              const reviewPassed = !pull.draft && approved && previews && await testsPassed();
+              let previews, reviewPassed;
+              try {
+                const approved = await testsPassed();
+                previews = await previewsPassed();
+                const current = await getPull();
+                if (current.state !== 'open' || current.base.ref !== pull.base.ref
+                  || current.head.sha !== sha || current.draft !== pull.draft) {
+                  // The change's own event reconciles it; an old success must not stay meanwhile.
+                  if (review?.state === 'success') await setReview('pending', 'The PR changed while it was checked.');
+                  return;
+                }
+                reviewPassed = !pull.draft && approved && previews && await testsPassed();
+              } catch (error) {
+                // A failed read must not leave a previous success in force.
+                await setReview('pending', 'Unable to verify the Ready requirements of this revision.');
+                throw error;
+              }
               await setReview(reviewPassed ? 'success' : 'pending', reviewPassed
                 ? 'Ready requirements passed for this revision.'
                 : previews ? 'Waiting for required tests of this revision.'
