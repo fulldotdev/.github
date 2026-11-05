@@ -8,10 +8,9 @@ Shared Linux jobs use GitHub's `ubuntu-24.04` for public repositories and the ca
 
 New projects take their callers from [astro-template](https://github.com/fulldotdev/astro-template) or [vite-template](https://github.com/fulldotdev/vite-template).
 
-- **Explore** experiments locally; **Implement** builds the requested change locally.
-- **Draft PR** saves a coherent checkpoint or provides a shared cloud preview. Reuse the task’s PR and batch local iterations. Source checks and tests do not delay the preview.
-- **Make PR ready** runs enabled checks and tests locally, then CI confirms them. Source checks and unit tests run alongside the Netlify build. URL tests use the preview of the tested PR head.
-- **Merge PR** merges the validated head and follows the production build and short, safe live checks.
+- **Working** builds and checks the change locally.
+- **Pull request** pushes the finished, reviewed work as a PR ready for review; every push runs CI, and drafts skip the tests. Source checks and unit tests run alongside the Netlify build. URL tests use the preview of the tested PR head.
+- **Merge** merges the validated head and follows the production build and short, safe live checks.
 
 Fulldev, astro-template and vite-template expose `fix`, `check`, `build` and `test`. `check` validates source; `build` includes intrinsic artifact validation. Internal `test:unit`, `test:http` and `test:browser` helpers let CI run the enabled suites in the right environment. Devices stay manual. Do not add empty scripts or test workflows for disabled categories.
 
