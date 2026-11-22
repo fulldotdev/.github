@@ -40,8 +40,15 @@ module.exports = async ({github, context, core, env, sleep = ms => new Promise(r
   const publication = pull.user?.login === 'cloudcannon[bot]' && pull.head.ref === 'preview'
     && pull.head.repo?.full_name === `${owner}/${repo}`;
   if (!publication) return;
+  // The PR may have changed while Review waited for the previews.
   const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: pull.number});
-  if (current.auto_merge) return;
+  if (current.state !== 'open' || current.draft || current.head.sha !== sha || current.base.ref !== pull.base.ref) {
+    return core.setFailed('The PR changed while Review waited. Re-run Review.');
+  }
+  if (current.auto_merge) {
+    if (current.auto_merge.merge_method === 'merge') return;
+    return core.setFailed(`Auto-merge is on as ${current.auto_merge.merge_method}; a publication from preview merges with a merge commit.`);
+  }
   try {
     await github.graphql(`mutation($id: ID!, $sha: GitObjectID!) {
       enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $sha, mergeMethod: MERGE}) {
