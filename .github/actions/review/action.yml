@@ -1,9 +1,9 @@
 name: Review
 description: >-
-  The required Review check of a pull request. It passes when every job the
-  calling job needs succeeded and each listed Netlify preview of the PR head
-  built. A CloudCannon publication then gets GitHub's auto-merge, which merges
-  it once the required checks pass.
+  The required Review check of a pull request. It passes when the PR is ready
+  for review, every job the calling job needs succeeded and each listed
+  Netlify preview of the head built. A CloudCannon publication then gets
+  GitHub's auto-merge, which merges it once the required checks pass.
 inputs:
   needs:
     description: The calling job's needs, as toJSON(needs).
@@ -14,9 +14,6 @@ inputs:
   timeout-minutes:
     description: How long to wait for the previews.
     default: "15"
-  merge-token:
-    description: Turns on auto-merge for CloudCannon publications. A GitHub App's token makes the merge start push workflows; GITHUB_TOKEN's does not.
-    default: ${{ github.token }}
 runs:
   using: composite
   steps:
@@ -26,7 +23,6 @@ runs:
         NEEDS: ${{ inputs.needs }}
         NETLIFY_CHECKS: ${{ inputs.netlify-checks }}
         TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
-        MERGE_TOKEN: ${{ inputs.merge-token }}
       with:
         script: |
           const review = require(`${process.env.ACTION_PATH}/review.cjs`)

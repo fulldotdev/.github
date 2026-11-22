@@ -6,37 +6,43 @@ const review = createRequire(import.meta.url)('../.github/actions/review/review.
 
 // One Review run against canned statuses: `statuses` gives the head's
 // statuses per poll, the last one repeating.
-async function run({needs = {check: {result: 'success'}}, previews = [], statuses = [[]], pull = {}, merge = {ok: true, body: {}}} = {}) {
+async function run({needs = {check: {result: 'success'}}, previews = [], statuses = [[]], pull = {}, autoMerge = null, refuse} = {}) {
   const failures = [];
-  const errors = [];
   const merges = [];
   let polls = 0;
   let clock = 0;
-  const github = {rest: {repos: {getCombinedStatusForRef: async ({ref}) => {
-    assert.equal(ref, 'head');
-    return {data: {statuses: statuses[Math.min(polls++, statuses.length - 1)]}};
-  }}}};
-  const fetch = async (url, {headers, body}) => {
-    merges.push({token: headers.Authorization, ...JSON.parse(body).variables});
-    return {ok: merge.ok, status: merge.ok ? 200 : 403, json: async () => merge.body};
+  const github = {
+    rest: {
+      repos: {getCombinedStatusForRef: async ({ref}) => {
+        assert.equal(ref, 'head');
+        return {data: {statuses: statuses[Math.min(polls++, statuses.length - 1)]}};
+      }},
+      pulls: {get: async () => ({data: {auto_merge: autoMerge}})},
+    },
+    graphql: async (query, variables) => {
+      if (refuse) throw new Error(refuse);
+      assert.match(query, /mergeMethod: MERGE/);
+      merges.push(variables);
+    },
   };
   await review({
     github,
-    context: {repo: {owner: 'o', repo: 'r'}, payload: {pull_request: {node_id: 'PR1', head: {sha: 'head', ref: 'feature', repo: {full_name: 'o/r'}},
-      user: {login: 'someone'}, ...pull}}},
-    core: {setFailed: message => failures.push(message), error: message => errors.push(message), info: () => {}},
-    env: {NEEDS: JSON.stringify(needs), NETLIFY_CHECKS: JSON.stringify(previews), TIMEOUT_MINUTES: '1', MERGE_TOKEN: 'merge-token'},
-    fetch,
+    context: {repo: {owner: 'o', repo: 'r'}, payload: {pull_request: {number: 1, node_id: 'PR1', draft: false,
+      head: {sha: 'head', ref: 'feature', repo: {full_name: 'o/r'}}, user: {login: 'someone'}, ...pull}}},
+    core: {setFailed: message => failures.push(message), info: () => {}},
+    env: {NEEDS: needs === null ? '' : JSON.stringify(needs), NETLIFY_CHECKS: JSON.stringify(previews), TIMEOUT_MINUTES: '1'},
     sleep: async ms => { clock += ms; },
     now: () => clock,
   });
-  return {failures, errors, merges, polls};
+  return {failures, merges, polls};
 }
 
 const preview = 'netlify/site/deploy-preview';
 const cloudcannon = {user: {login: 'cloudcannon[bot]'}, head: {sha: 'head', ref: 'preview', repo: {full_name: 'o/r'}}};
 
-test('Review fails when a needed job failed, was cancelled or was skipped', async () => {
+test('Review fails a draft, a caller without needs, and a needed job that did not succeed', async () => {
+  assert.match((await run({pull: {draft: true}})).failures[0], /draft/);
+  for (const needs of [null, {}]) assert.match((await run({needs})).failures[0], /needs the jobs/);
   for (const result of ['failure', 'cancelled', 'skipped']) {
     const {failures} = await run({needs: {check: {result: 'success'}, test: {result}}});
     assert.match(failures[0], new RegExp(`test \\(${result}\\)`));
@@ -55,13 +61,11 @@ test('Review waits for the previews of the head and fails on a failed or missing
 });
 
 test('Review turns on auto-merge only for a passed CloudCannon publication from the same repository', async () => {
-  const published = await run({pull: cloudcannon});
-  assert.deepEqual(published.merges, [{token: 'Bearer merge-token', id: 'PR1', sha: 'head'}]);
+  assert.deepEqual((await run({pull: cloudcannon})).merges, [{id: 'PR1', sha: 'head'}]);
+  assert.deepEqual((await run({pull: cloudcannon, autoMerge: {merge_method: 'merge'}})).merges, []);
   for (const pull of [{}, {...cloudcannon, head: {...cloudcannon.head, repo: {full_name: 'fork/r'}}}]) {
     assert.deepEqual((await run({pull})).merges, []);
   }
   assert.deepEqual((await run({pull: cloudcannon, needs: {check: {result: 'failure'}}})).merges, []);
-  const refused = await run({pull: cloudcannon, merge: {ok: false, body: {}}});
-  assert.deepEqual(refused.failures, []);
-  assert.match(refused.errors[0], /Auto-merge could not be turned on/);
+  assert.match((await run({pull: cloudcannon, refuse: 'Auto merge is not allowed'})).failures[0], /would not merge/);
 });

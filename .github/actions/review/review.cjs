@@ -1,12 +1,14 @@
 // The Review check (action.yml). It runs as a job of the pull request's own
 // workflow, so a new push cancels it and a rerun resets it.
-module.exports = async ({github, context, core, env, fetch = globalThis.fetch, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now}) => {
+module.exports = async ({github, context, core, env, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now}) => {
   const pull = context.payload.pull_request;
   if (!pull) throw new Error('Review runs on pull_request events only.');
+  // A skipped required check counts as passed, so a draft fails instead.
+  if (pull.draft) return core.setFailed('A draft is not reviewed. Mark the PR ready for review.');
 
-  // A skipped required check counts as passed, so a skipped, cancelled or
-  // failed job fails Review.
+  // So does a skipped, cancelled or failed job, and a caller that names none.
   const needs = JSON.parse(env.NEEDS || '{}');
+  if (!Object.keys(needs).length) return core.setFailed('Review needs the jobs it reviews, as toJSON(needs).');
   const unfinished = Object.entries(needs).filter(([, job]) => job.result !== 'success')
     .map(([name, job]) => `${name} (${job.result})`);
   if (unfinished.length) return core.setFailed(`Did not succeed: ${unfinished.join(', ')}.`);
@@ -16,7 +18,8 @@ module.exports = async ({github, context, core, env, fetch = globalThis.fetch, s
   const {owner, repo} = context.repo;
   const sha = pull.head.sha;
   const previews = JSON.parse(env.NETLIFY_CHECKS || '[]');
-  const deadline = now() + Number(env.TIMEOUT_MINUTES || 15) * 60_000;
+  const minutes = Number(env.TIMEOUT_MINUTES || 15);
+  const deadline = now() + minutes * 60_000;
   for (;;) {
     const {data} = await github.rest.repos.getCombinedStatusForRef({owner, repo, ref: sha, per_page: 100});
     const state = name => data.statuses.find(status => status.context === name)?.state;
@@ -25,28 +28,27 @@ module.exports = async ({github, context, core, env, fetch = globalThis.fetch, s
     const waiting = previews.filter(name => state(name) !== 'success');
     if (!waiting.length) break;
     if (now() > deadline) {
-      return core.setFailed(`Previews did not finish within ${env.TIMEOUT_MINUTES || 15} minutes: ${waiting.join(', ')}. Re-run Review once they have.`);
+      return core.setFailed(`Previews did not finish within ${minutes} minutes: ${waiting.join(', ')}. Re-run Review once they have.`);
     }
     core.info(`Waiting for ${waiting.join(', ')}`);
     await sleep(15_000);
   }
 
-  // CloudCannon's Publish button opens a same-repository PR from `preview`.
+  // CloudCannon's Publish button opens a same-repository PR from `preview`;
+  // GitHub merges it once the required checks pass. Without auto-merge it
+  // would wait unseen, so a refusal fails Review.
   const publication = pull.user?.login === 'cloudcannon[bot]' && pull.head.ref === 'preview'
     && pull.head.repo?.full_name === `${owner}/${repo}`;
   if (!publication) return;
-  const response = await fetch(env.GITHUB_GRAPHQL_URL || 'https://api.github.com/graphql', {
-    method: 'POST',
-    headers: {Authorization: `Bearer ${env.MERGE_TOKEN}`, 'Content-Type': 'application/json'},
-    body: JSON.stringify({query: `mutation($id: ID!, $sha: GitObjectID!) {
+  const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: pull.number});
+  if (current.auto_merge) return;
+  try {
+    await github.graphql(`mutation($id: ID!, $sha: GitObjectID!) {
       enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $sha, mergeMethod: MERGE}) {
         pullRequest { number }
       }
-    }`, variables: {id: pull.node_id, sha}}),
-  });
-  const result = await response.json().catch(() => ({}));
-  // The checks passed, so a person can still merge it.
-  if (!response.ok || result.errors) {
-    core.error(`Auto-merge could not be turned on: ${result.errors?.[0]?.message ?? response.status}`);
+    }`, {id: pull.node_id, sha});
+  } catch (error) {
+    core.setFailed(`Auto-merge could not be turned on, so this publication would not merge: ${error.message}`);
   }
 };
