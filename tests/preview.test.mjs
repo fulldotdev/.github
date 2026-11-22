@@ -56,7 +56,7 @@ async function scenario(options = {}) {
     }},
   }};
   await execute(github, {repo: {owner: 'o', repo: 'r'}, payload: {pull_request: pull}},
-    {info() {}, setOutput: (name, value) => { outputs[name] = value; }},
+    {info() {}, getInput: () => '', setOutput: (name, value) => { outputs[name] = value; }},
     {env: {...process.env, PREVIEW_CHECKS: JSON.stringify(names), DEPLOYMENTS: JSON.stringify(options.targets ?? []), GITHUB_WORKSPACE: options.root,
       GITHUB_WORKFLOW_REF: options.workflowRef ?? ''}},
     {now: () => clock}, callback => { clock += 60 * 1000; callback(); },
@@ -163,6 +163,32 @@ test('a later unrelated push still tests the cumulative PR change on a proven un
   const head = f.commit('README.md', 'later unrelated push');
   const result = await scenario({...f, head, statuses: [skipped('netlify/app/deploy-preview')], revisions: {[appAlias]: revision}});
   assert.deepEqual(JSON.parse(result.outputs['deploy-urls']), {'netlify/app/deploy-preview': appAlias});
+});
+
+test('a rebased PR reuses the preview built before the rebase when its inputs did not change', async t => {
+  const f = fixture(t);
+  const origin = mkdtempSync(join(tmpdir(), 'qa-origin-'));
+  t.after(() => rmSync(origin, {recursive: true, force: true}));
+  const git = (...args) => execFileSync('git', args, {cwd: f.root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']}).trim();
+  execFileSync('git', ['init', '-q', '--bare', origin]);
+  git('remote', 'add', 'origin', origin);
+  const built = f.commit('apps/app/source.txt', 'app changed');
+  // Like GitHub, origin serves a force-pushed commit no branch points at.
+  execFileSync('git', ['-C', origin, 'config', 'uploadpack.allowAnySHA1InWant', 'true']);
+  git('push', '-q', 'origin', `${built}:refs/heads/before-rebase`);
+  git('push', '-q', 'origin', '--delete', 'before-rebase');
+  // The base moves on and the PR is rebased onto it; only origin keeps the
+  // commit Netlify built.
+  git('reset', '-q', '--hard', f.base);
+  const base = f.commit('README.md', 'base moved on');
+  const head = f.commit('apps/app/source.txt', 'app changed');
+  git('reflog', 'expire', '--expire=now', '--all');
+  git('gc', '-q', '--prune=now');
+  assert.throws(() => git('cat-file', '-e', `${built}^{commit}`));
+  const options = {...f, base, head, statuses: [skipped('netlify/app/deploy-preview')]};
+  const result = await scenario({...options, revisions: {[appAlias]: built}});
+  assert.deepEqual(JSON.parse(result.outputs['deploy-urls']), {'netlify/app/deploy-preview': appAlias});
+  await assert.rejects(scenario({...options, revisions: {[appAlias]: 'f'.repeat(40)}}), /within 12 minutes/);
 });
 
 test('a skipped or manually canceled changed app cannot reuse stale code or production', async t => {
