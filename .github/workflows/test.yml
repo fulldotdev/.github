@@ -145,12 +145,37 @@ jobs:
                 '.github/workflows/test.yml', ...caller ? [caller] : []]);
               selected = targets.filter(site => testChanges || changed(site, baseline, sha));
               names = selected.map(site => site.context);
-              compatible = (site, revision) => {
+              // A rebase leaves previews built from commits outside the PR's
+              // history. Netlify skips a new build when their inputs did not
+              // change, so compare the inputs, not the history.
+              const isCommit = revision => {
+                try { git(['cat-file', '-e', `${revision}^{commit}`]); return true; }
+                catch { return false; }
+              };
+              // Only origin still has a commit a force-push removed. A failed
+              // fetch is tried again on the next poll.
+              const available = revision => {
+                if (isCommit(revision)) return true;
+                const auth = Buffer.from(`x-access-token:${core.getInput('github-token')}`).toString('base64');
+                try {
+                  execFileSync('git', ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', 'origin', revision], {
+                    cwd: root, stdio: 'ignore', timeout: Math.max(1000, Math.min(30000, deadline - Date.now())),
+                    env: {...process.env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+                      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${auth}`},
+                  });
+                } catch { return false; }
+                return isCommit(revision);
+              };
+              // Only the PR's own previews can predate a rebase; production must
+              // come from its history.
+              const inHistory = revision => {
+                try { git(['merge-base', '--is-ancestor', revision, sha]); return true; }
+                catch { return false; }
+              };
+              compatible = (site, revision, production = false) => {
                 if (!/^[0-9a-f]{40}$/.test(revision || '')) return false;
                 if (revision === sha) return true;
-                try { git(['merge-base', '--is-ancestor', revision, sha]); }
-                catch { return false; }
-                return !changed(site, revision, sha);
+                return (production ? inHistory(revision) : available(revision)) && !changed(site, revision, sha);
               };
               core.info(`Affected previews: ${names.join(', ') || 'none'}`);
               if (!names.length) {
@@ -211,7 +236,7 @@ jobs:
                   // Static websites may have no first preview when their build was skipped.
                   // Signed-in apps must always use their isolated preview.
                   const production = await revisionAt(target.url);
-                  if (compatible(target, production)) {
+                  if (compatible(target, production, true)) {
                     urls[name] = target.url;
                     revisions[target.url] = production;
                   }
