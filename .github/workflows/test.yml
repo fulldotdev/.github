@@ -138,8 +138,11 @@ jobs:
               let baseline;
               try { baseline = git(['merge-base', pull.base.sha, sha]); }
               catch { core.info('No PR baseline available; test every deployment.'); }
-              // Test changes must exercise the new tests on every declared target.
-              const testChanges = !baseline || git(['diff', '--name-only', baseline, sha, '--', 'tests', '.github/workflows/test.yml']);
+              // Test changes must exercise the new tests on every declared target,
+              // also a change of the calling workflow (GITHUB_WORKFLOW_REF names it).
+              const caller = (process.env.GITHUB_WORKFLOW_REF || '').split('@')[0].split('/').slice(2).join('/');
+              const testChanges = !baseline || git(['diff', '--name-only', baseline, sha, '--', 'tests',
+                '.github/workflows/test.yml', ...caller ? [caller] : []]);
               selected = targets.filter(site => testChanges || changed(site, baseline, sha));
               names = selected.map(site => site.context);
               compatible = (site, revision) => {

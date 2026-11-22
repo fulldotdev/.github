@@ -57,7 +57,8 @@ async function scenario(options = {}) {
   }};
   await execute(github, {repo: {owner: 'o', repo: 'r'}, payload: {pull_request: pull}},
     {info() {}, setOutput: (name, value) => { outputs[name] = value; }},
-    {env: {...process.env, PREVIEW_CHECKS: JSON.stringify(names), DEPLOYMENTS: JSON.stringify(options.targets ?? []), GITHUB_WORKSPACE: options.root}},
+    {env: {...process.env, PREVIEW_CHECKS: JSON.stringify(names), DEPLOYMENTS: JSON.stringify(options.targets ?? []), GITHUB_WORKSPACE: options.root,
+      GITHUB_WORKFLOW_REF: options.workflowRef ?? ''}},
     {now: () => clock}, callback => { clock += 60 * 1000; callback(); },
     createRequire(import.meta.url), async url => ({ok: !options.missingMarker,
       json: async () => ({revision: options.revisions?.[new URL(url).origin] ?? pull.head.sha})}));
@@ -181,11 +182,16 @@ test('only explicitly read-only sites may reuse matching production when no firs
   await assert.rejects(scenario({...options, targets: f.targets.map(site => ({...site, 'production-fallback': false}))}), /within 12 minutes/);
 });
 
-test('changed tests exercise all targets and missing baselines fail safe to every target', async t => {
+test('changed tests or a changed calling workflow exercise all targets and missing baselines fail safe to every target', async t => {
   const f = fixture(t);
   const head = f.commit('tests/http/example.spec.ts', 'new test');
   assert.equal(Object.keys(JSON.parse((await scenario({...f, head})).outputs['deploy-urls'])).length, 2);
   assert.equal(Object.keys(JSON.parse((await scenario({...f, head, base: 'missing-base'})).outputs['deploy-urls'])).length, 2);
+  const g = fixture(t);
+  const caller = g.commit('.github/workflows/check.yml', 'calling workflow changed');
+  const workflowRef = 'o/r/.github/workflows/check.yml@refs/pull/7/merge';
+  assert.equal((await scenario({...g, head: caller})).outputs['web-enabled'], 'false');
+  assert.equal(Object.keys(JSON.parse((await scenario({...g, head: caller, workflowRef})).outputs['deploy-urls'])).length, 2);
 });
 
 test('an explicit empty scope skips URL work without waiting for unused statuses', async t => {
