@@ -1,5 +1,7 @@
 // The Review check (action.yml). It runs as a job of the pull request's own
-// workflow, so a new push cancels it and a rerun resets it.
+// workflow, and a rerun resets it. Its `always()` keeps it running when a new
+// push cancels the run, and the new run waits for it in the concurrency group,
+// so it stops waiting once the PR moved on.
 module.exports = async ({github, context, core, env, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now}) => {
   const pull = context.payload.pull_request;
   if (!pull) throw new Error('Review runs on pull_request events only.');
@@ -20,6 +22,7 @@ module.exports = async ({github, context, core, env, sleep = ms => new Promise(r
   const previews = JSON.parse(env.NETLIFY_CHECKS || '[]');
   const minutes = Number(env.TIMEOUT_MINUTES || 15);
   const deadline = now() + minutes * 60_000;
+  const current = async () => (await github.rest.pulls.get({owner, repo, pull_number: pull.number})).data;
   for (;;) {
     const {data} = await github.rest.repos.getCombinedStatusForRef({owner, repo, ref: sha, per_page: 100});
     const state = name => data.statuses.find(status => status.context === name)?.state;
@@ -29,6 +32,13 @@ module.exports = async ({github, context, core, env, sleep = ms => new Promise(r
     if (!waiting.length) break;
     if (now() > deadline) {
       return core.setFailed(`Previews did not finish within ${minutes} minutes: ${waiting.join(', ')}. Re-run Review once they have.`);
+    }
+    // A newer push, a draft or a closed PR starts no preview of this head
+    // that this run should wait for; the PR's newer run reviews it. Without
+    // `pull-requests: read`, or when GitHub fails the read, Review waits on.
+    const pr = await current().catch(error => core.info(`Could not read the PR: ${error.message}`));
+    if (pr && (pr.state !== 'open' || pr.draft || pr.head.sha !== sha)) {
+      return core.setFailed('The PR changed while Review waited for its previews; a newer run reviews it.');
     }
     core.info(`Waiting for ${waiting.join(', ')}`);
     await sleep(15_000);
@@ -41,13 +51,13 @@ module.exports = async ({github, context, core, env, sleep = ms => new Promise(r
     && pull.head.repo?.full_name === `${owner}/${repo}`;
   if (!publication) return;
   // The PR may have changed while Review waited for the previews.
-  const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: pull.number});
-  if (current.state !== 'open' || current.draft || current.head.sha !== sha || current.base.ref !== pull.base.ref) {
+  const pr = await current();
+  if (pr.state !== 'open' || pr.draft || pr.head.sha !== sha || pr.base.ref !== pull.base.ref) {
     return core.setFailed('The PR changed while Review waited. Re-run Review.');
   }
-  if (current.auto_merge) {
-    if (current.auto_merge.merge_method === 'merge') return;
-    return core.setFailed(`Auto-merge is on as ${current.auto_merge.merge_method}; a publication from preview merges with a merge commit.`);
+  if (pr.auto_merge) {
+    if (pr.auto_merge.merge_method === 'merge') return;
+    return core.setFailed(`Auto-merge is on as ${pr.auto_merge.merge_method}; a publication from preview merges with a merge commit.`);
   }
   try {
     await github.graphql(`mutation($id: ID!, $sha: GitObjectID!) {

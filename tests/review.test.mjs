@@ -6,7 +6,7 @@ const review = createRequire(import.meta.url)('../.github/actions/review/review.
 
 // One Review run against canned statuses: `statuses` gives the head's
 // statuses per poll, the last one repeating.
-async function run({needs = {check: {result: 'success'}}, previews = [], statuses = [[]], pull = {}, current = {}, autoMerge = null, refuse} = {}) {
+async function run({needs = {check: {result: 'success'}}, previews = [], statuses = [[]], pull = {}, current = {}, autoMerge = null, refuse, unreadable} = {}) {
   const failures = [];
   const merges = [];
   let polls = 0;
@@ -17,7 +17,10 @@ async function run({needs = {check: {result: 'success'}}, previews = [], statuse
         assert.equal(ref, 'head');
         return {data: {statuses: statuses[Math.min(polls++, statuses.length - 1)]}};
       }},
-      pulls: {get: async () => ({data: {state: 'open', draft: false, head: {sha: 'head'}, base: {ref: 'main'}, auto_merge: autoMerge, ...current}})},
+      pulls: {get: async () => {
+        if (unreadable) throw new Error('Resource not accessible by integration');
+        return {data: {state: 'open', draft: false, head: {sha: 'head'}, base: {ref: 'main'}, auto_merge: autoMerge, ...current}};
+      }},
     },
     graphql: async (query, variables) => {
       if (refuse) throw new Error(refuse);
@@ -58,6 +61,21 @@ test('Review waits for the previews of the head and fails on a failed or missing
   assert.match(failed.failures[0], /Preview failed/);
   const missing = await run({previews: [preview], statuses: [pending]});
   assert.match(missing.failures[0], /did not finish within 1 minutes/);
+});
+
+test('Review stops waiting once the PR moved on, so the newer run is not held up', async () => {
+  const pending = [[{context: preview, state: 'pending'}]];
+  for (const current of [{head: {sha: 'newer'}}, {draft: true}, {state: 'closed'}]) {
+    const stopped = await run({previews: [preview], statuses: pending, current});
+    assert.match(stopped.failures[0], /newer run reviews it/);
+    assert.equal(stopped.polls, 1);
+  }
+  // Without `pull-requests: read`, Review waits for the previews as before.
+  const unreadable = await run({previews: [preview], statuses: [...pending, [{context: preview, state: 'success'}]], unreadable: true});
+  assert.deepEqual(unreadable.failures, []);
+  // A retargeted PR starts no new run, so Review keeps waiting.
+  const retargeted = await run({previews: [preview], statuses: pending, current: {base: {ref: 'other'}}});
+  assert.match(retargeted.failures[0], /did not finish within 1 minutes/);
 });
 
 test('Review turns on auto-merge only for a passed CloudCannon publication from the same repository', async () => {
