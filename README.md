@@ -30,4 +30,31 @@ Jobs that mostly wait, such as Test, Test live and Review, run on Blacksmith's A
 
 Live URL tests run after deployment, outside the build command. Product scenarios and fixture writes stay on previews. A repository may pass `live-test-email` and `live-test-password` only from its trusted main workflow for one ordinary login/read/sign-out smoke with its own limited account; browser recordings and signed-in artifacts stay off.
 
-Keep repository auto-merge disabled except for content publishers. For CloudCannon's Publish button, a same-repository `preview` PR from `cloudcannon[bot]`, Review turns on GitHub's auto-merge with a merge commit once its checks and previews pass, and fails when GitHub refuses it; its job needs `contents: write` and `pull-requests: write`, and the repository both settings. Fulldev Sites publishes a content PR by asking GitHub to merge it once its required checks pass. Code PRs are merged by their agent.
+Keep repository auto-merge disabled except for content publishers and Dependabot. For CloudCannon's Publish button, a same-repository `preview` PR from `cloudcannon[bot]`, Review turns on GitHub's auto-merge with a merge commit once its checks and previews pass, and fails when GitHub refuses it; its job needs `contents: write` and `pull-requests: write`, and the repository both settings. Fulldev Sites publishes a content PR by asking GitHub to merge it once its required checks pass. Code PRs are merged by their agent.
+
+Dependabot's routine npm updates merge by themselves through [the Dependabot action](.github/actions/dependabot): websites and the Astro and Vite templates call it from a `Dependabot` workflow on `pull_request_target`, which runs the default branch's file and never checks out the PR. Each run first turns off auto-merge from an earlier run, then turns on GitHub's squash auto-merge again only when the default branch requires `Check / Check` and `Review` (without them auto-merge would merge at once, even when red), every update is a patch step or a minor step from 1.0 up, every commit is Dependabot's and signed by GitHub, and nothing under `.github/` changes. GitHub then merges once the required checks pass. Majors, minors below 1.0, pre-releases, other ecosystems and anything else stay for a person, because checks do not catch visual changes. The organization's GitHub App token (`RELEASE_APP_CLIENT_ID`, `RELEASE_APP_PRIVATE_KEY`) turns it on, so the merge starts the workflows on main; without both in the repository, or without the app installed there, the job fails and nothing merges. The repository needs Allow auto-merge. Any workflow in a repository that gets the key can mint the app's tokens, so share it only with these repositories, or keep it in an environment that only `main` may use, which `pull_request_target` runs count as.
+
+```yaml
+name: Dependabot
+
+# Dependabot's patch and minor npm updates merge by themselves once the
+# required checks pass. pull_request_target runs this file from main, so a PR
+# cannot change it; the action never checks out the PR.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    name: Auto-merge
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || 'blacksmith-2vcpu-ubuntu-2404-arm' }}
+    timeout-minutes: 5
+    steps:
+      - uses: fulldotdev/.github/.github/actions/dependabot@<sha>
+        with:
+          app-client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+```

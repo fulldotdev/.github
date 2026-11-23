@@ -1,0 +1,43 @@
+name: Dependabot auto-merge
+description: >-
+  Turns on GitHub's auto-merge for a Dependabot npm PR with only patch and
+  minor updates, in a repository whose default branch requires Check / Check
+  and Review. GitHub merges it once those pass. Everything else stays for a
+  person. Call it from an `on: pull_request_target` workflow, so the default
+  branch's file runs, and never check out the PR.
+inputs:
+  app-client-id:
+    description: The organization's GitHub App client ID (vars.RELEASE_APP_CLIENT_ID).
+    default: ""
+  app-private-key:
+    description: Its private key (secrets.RELEASE_APP_PRIVATE_KEY). The app's token makes the merge start the workflows on main, which GITHUB_TOKEN's would not.
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Require the app credentials
+      shell: bash
+      env:
+        CLIENT_ID: ${{ inputs.app-client-id }}
+        HAS_KEY: ${{ inputs.app-private-key != '' }}
+      run: |
+        if [ -z "$CLIENT_ID" ] || [ "$HAS_KEY" != "true" ]; then
+          echo "::error::Auto-merge needs the organization's RELEASE_APP_CLIENT_ID variable and RELEASE_APP_PRIVATE_KEY secret in this repository."
+          exit 1
+        fi
+    - name: Create app token
+      id: token
+      uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+      with:
+        client-id: ${{ inputs.app-client-id }}
+        private-key: ${{ inputs.app-private-key }}
+        permission-contents: write
+        permission-pull-requests: write
+    - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      with:
+        github-token: ${{ steps.token.outputs.token }}
+        script: |
+          const dependabot = require(`${process.env.ACTION_PATH}/dependabot.cjs`)
+          await dependabot({github, context, core})

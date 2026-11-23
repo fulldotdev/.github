@@ -1,0 +1,118 @@
+Bump the security group across 1 directory with 11 updates
+
+Bumps the security group with 11 updates in the / directory:
+
+| Package | From | To |
+| --- | --- | --- |
+| [astro](https://github.com/withastro/astro/tree/HEAD/packages/astro) | `7.3.8` | `7.4.7` |
+| [@hono/node-server](https://github.com/honojs/node-server) | `2.1.4` | `2.1.11` |
+| [body-parser](https://github.com/expressjs/body-parser) | `2.3.0` | `2.4.0` |
+| [fast-uri](https://github.com/fastify/fast-uri) | `3.1.8` | `3.1.9` |
+| [fast-xml-parser](https://github.com/NaturalIntelligence/fast-xml-parser) | `5.11.2` | `5.12.1` |
+| [glob](https://github.com/isaacs/node-glob) | `13.0.6` | `13.0.7` |
+| [ip-address](https://github.com/beaugunderson/ip-address) | `10.7.3` | `10.7.6` |
+| [node-forge](https://github.com/digitalbazaar/forge) | `1.4.0` | `1.4.3` |
+| [qs](https://github.com/ljharb/qs) | `6.16.0` | `6.17.1` |
+| [systeminformation](https://github.com/sebhildebrandt/systeminformation) | `5.33.15` | `5.33.23` |
+| [undici](https://github.com/nodejs/undici) | `7.30.0` | `7.30.2` |
+
+
+
+Updates `astro` from 7.3.8 to 7.4.7
+- [Release notes](https://github.com/withastro/astro/releases)
+- [Changelog](https://github.com/withastro/astro/blob/main/packages/astro/CHANGELOG.md)
+- [Commits](https://github.com/withastro/astro/commits/astro@7.4.7/packages/astro)
+
+Updates `@hono/node-server` from 2.1.4 to 2.1.11
+- [Release notes](https://github.com/honojs/node-server/releases)
+- [Commits](https://github.com/honojs/node-server/compare/v2.1.4...v2.1.11)
+
+Updates `body-parser` from 2.3.0 to 2.4.0
+- [Release notes](https://github.com/expressjs/body-parser/releases)
+- [Changelog](https://github.com/expressjs/body-parser/blob/master/HISTORY.md)
+- [Commits](https://github.com/expressjs/body-parser/compare/v2.3.0...v2.4.0)
+
+Updates `fast-uri` from 3.1.8 to 3.1.9
+- [Release notes](https://github.com/fastify/fast-uri/releases)
+- [Commits](https://github.com/fastify/fast-uri/compare/v3.1.8...v3.1.9)
+
+Updates `fast-xml-parser` from 5.11.2 to 5.12.1
+- [Release notes](https://github.com/NaturalIntelligence/fast-xml-parser/releases)
+- [Changelog](https://github.com/NaturalIntelligence/fast-xml-parser/blob/master/CHANGELOG.md)
+- [Commits](https://github.com/NaturalIntelligence/fast-xml-parser/compare/v5.11.2...v5.12.1)
+
+Updates `glob` from 13.0.6 to 13.0.7
+- [Release notes](https://github.com/isaacs/node-glob/releases)
+- [Changelog](https://github.com/isaacs/node-glob/blob/main/changelog.md)
+- [Commits](https://github.com/isaacs/node-glob/compare/v13.0.6...v13.0.7)
+
+Updates `ip-address` from 10.7.3 to 10.7.6
+- [Release notes](https://github.com/beaugunderson/ip-address/releases)
+- [Commits](https://github.com/beaugunderson/ip-address/compare/v10.7.3...v10.7.6)
+
+Updates `node-forge` from 1.4.0 to 1.4.3
+- [Changelog](https://github.com/digitalbazaar/forge/blob/main/CHANGELOG.md)
+- [Commits](https://github.com/digitalbazaar/forge/compare/v1.4.0...v1.4.3)
+
+Updates `qs` from 6.16.0 to 6.17.1
+- [Changelog](https://github.com/ljharb/qs/blob/main/CHANGELOG.md)
+- [Commits](https://github.com/ljharb/qs/compare/v6.16.0...v6.17.1)
+
+Updates `systeminformation` from 5.33.15 to 5.33.23
+- [Release notes](https://github.com/sebhildebrandt/systeminformation/releases)
+- [Changelog](https://github.com/sebhildebrandt/systeminformation/blob/master/CHANGELOG.md)
+- [Commits](https://github.com/sebhildebrandt/systeminformation/compare/v5.33.15...v5.33.23)
+
+Updates `undici` from 7.30.0 to 7.30.2
+- [Release notes](https://github.com/nodejs/undici/releases)
+- [Commits](https://github.com/nodejs/undici/compare/v7.30.0...v7.30.2)
+
+---
+updated-dependencies:
+- dependency-name: astro
+  dependency-version: 7.4.7
+  dependency-type: direct:production
+  dependency-group: security
+- dependency-name: "@hono/node-server"
+  dependency-version: 2.1.11
+  dependency-type: indirect
+  dependency-group: security
+- dependency-name: body-parser
+  dependency-version: 2.4.0
+  dependency-type: indirect
+  dependency-group: security
+- dependency-name: fast-uri
+  dependency-version: 3.1.9
+  dependency-type: indirect
+  dependency-group: security
+- dependency-name: fast-xml-parser
+  dependency-version: 5.12.1
+  dependency-type: indirect
+  dependency-group: security
+- dependency-name: glob
+  dependency-version: 13.0.7
+  dependency-type: indirect
+  dependency-group: security
+- dependency-name: ip-address
+  dependency-version: 10.7.6
+  dependency-type: indirect
+  dependency-group: security
+- dependency-name: node-forge
+  dependency-version: 1.4.3
+  dependency-type: indirect
+  dependency-group: security
+- dependency-name: qs
+  dependency-version: 6.17.1
+  dependency-type: indirect
+  dependency-group: security
+- dependency-name: systeminformation
+  dependency-version: 5.33.23
+  dependency-type: indirect
+  dependency-group: security
+- dependency-name: undici
+  dependency-version: 7.30.2
+  dependency-type: indirect
+  dependency-group: security
+...
+
+Signed-off-by: dependabot[bot] <support@github.com>
