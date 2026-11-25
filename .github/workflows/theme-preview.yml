@@ -1,0 +1,109 @@
+# A preview theme for each pull request of a Shopify theme, which Fulldev
+# Sites shows as that version's preview and where its bar edits the branch.
+# Each push to an open pull request from the same repository mirrors the
+# branch to an unpublished theme named after it (Sites's branches are
+# cms/<id>, which the bar reads from the theme's name) and reports the
+# theme's preview link as the commit status fulldev/theme-preview/<number>.
+# Closing the pull request deletes the theme. A store holds at most 20
+# themes; a push past that fails and reports so.
+#
+# The caller runs on pull_request (opened, synchronize, reopened, closed),
+# grants `contents: read` and `statuses: write`, and passes the store and
+# the repository secret SHOPIFY_CLI_THEME_TOKEN: a Theme Access password
+# of that store.
+name: Theme preview
+
+on:
+  workflow_call:
+    inputs:
+      store:
+        description: The store's myshopify.com address.
+        required: true
+        type: string
+      path:
+        description: The theme's folder in the repository.
+        type: string
+        default: .
+      runner:
+        type: string
+        default: blacksmith-2vcpu-ubuntu-2404
+    secrets:
+      SHOPIFY_CLI_THEME_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  preview:
+    name: Theme preview
+    # A fork's pull request gets no secrets, and its branch is not Sites's.
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || inputs.runner }}
+    timeout-minutes: 15
+    concurrency:
+      group: theme-preview-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      SHOPIFY_CLI_THEME_TOKEN: ${{ secrets.SHOPIFY_CLI_THEME_TOKEN }}
+      SHOPIFY_FLAG_STORE: ${{ inputs.store }}
+      BRANCH: ${{ github.head_ref }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      NUMBER: ${{ github.event.pull_request.number }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout the pull request's head
+        if: ${{ github.event.action != 'closed' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install Shopify CLI
+        run: npm install --global --no-audit --no-fund @shopify/cli@3
+      - name: Find the branch's preview theme
+        id: theme
+        run: |
+          # Shopify takes a theme name of at most 50 characters.
+          name="${BRANCH:0:50}"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          id=$(shopify theme list --json | jq -r --arg name "$name" \
+            '[.[] | select(.name == $name and .role == "unpublished")][0].id // empty')
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: Report building
+        if: ${{ github.event.action != 'closed' }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=pending -f context="fulldev/theme-preview/$NUMBER" \
+            -f description="Building the preview theme" > /dev/null
+      - name: Push the branch to its preview theme
+        if: ${{ github.event.action != 'closed' }}
+        working-directory: ${{ inputs.path }}
+        env:
+          NAME: ${{ steps.theme.outputs.name }}
+          ID: ${{ steps.theme.outputs.id }}
+        run: |
+          if [ -n "$ID" ]; then
+            shopify theme push --theme "$ID" --json > "$RUNNER_TEMP/push.json"
+          else
+            shopify theme push --unpublished --theme "$NAME" --json > "$RUNNER_TEMP/push.json"
+          fi
+          url=$(jq -r '.theme.preview_url // empty' "$RUNNER_TEMP/push.json")
+          if [ -z "$url" ]; then
+            echo "Shopify CLI answered no preview link." >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=success -f context="fulldev/theme-preview/$NUMBER" \
+            -f target_url="$url" -f description="Preview theme ready" > /dev/null
+      - name: Report a failed push
+        if: ${{ failure() && github.event.action != 'closed' }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=failure -f context="fulldev/theme-preview/$NUMBER" \
+            -f description="The preview theme did not update" > /dev/null
+      - name: Delete the preview theme
+        if: ${{ github.event.action == 'closed' && steps.theme.outputs.id != '' }}
+        env:
+          ID: ${{ steps.theme.outputs.id }}
+        run: shopify theme delete --theme "$ID" --force
