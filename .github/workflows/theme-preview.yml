@@ -1,0 +1,184 @@
+# A preview theme for each pull request of a Shopify theme, which Fulldev
+# Sites shows as that version's preview and where its bar edits the branch.
+# Each push to an open pull request into the default branch, from the same
+# repository, mirrors the branch to an unpublished theme named after the
+# pull request and the repository, "#<number> <tag> <branch>" (Sites's
+# branches are cms/<id>, which the bar reads from the end of the name), and
+# reports the theme's preview link as the commit status
+# fulldev/theme-preview/<number>. Only that pull request's theme is updated
+# or deleted, so a merchant's own themes and other pull requests' previews,
+# also another repository's on the same store, stay. Closing the pull request, or moving
+# it to another base branch, deletes the theme. A store holds at most 20
+# themes; a push past that fails and reports so.
+#
+# The caller runs on pull_request_target (opened, synchronize, reopened,
+# edited, closed) without a branch filter, since GitHub skips pull_request
+# workflows while a pull request has a merge conflict; the job only uploads
+# the branch's files to Shopify, never runs them, and only for a branch of
+# the same repository. The caller grants `contents: read`,
+# `pull-requests: read` and `statuses: write`, and passes the store and the
+# repository secret SHOPIFY_CLI_THEME_TOKEN: a Theme Access password of that
+# store.
+name: Theme preview
+
+on:
+  workflow_call:
+    inputs:
+      store:
+        description: The store's myshopify.com address.
+        required: true
+        type: string
+      path:
+        description: The theme's folder in the repository.
+        type: string
+        default: .
+      runner:
+        type: string
+        default: blacksmith-2vcpu-ubuntu-2404
+    secrets:
+      # Without it the job skips, saying so.
+      SHOPIFY_CLI_THEME_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  preview:
+    name: Theme preview
+    # A fork's pull request gets no secrets, and its branch is not Sites's;
+    # an edit counts only where it moved the pull request to another base.
+    if: >-
+      ${{ github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'edited' || github.event.changes.base) }}
+    runs-on: ${{ vars.CI_RUNNER || (github.event.repository.private == false && 'ubuntu-24.04') || inputs.runner }}
+    timeout-minutes: 15
+    # Each job waits its turn, none cancelled, and reads the pull request
+    # once it runs, so an older one never stops the newest.
+    concurrency:
+      group: theme-preview-${{ github.repository }}-${{ github.event.pull_request.number }}
+      queue: max
+    env:
+      SHOPIFY_CLI_THEME_TOKEN: ${{ secrets.SHOPIFY_CLI_THEME_TOKEN }}
+      SHOPIFY_FLAG_STORE: ${{ inputs.store }}
+      BRANCH: ${{ github.head_ref }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      NUMBER: ${{ github.event.pull_request.number }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # The pull request as it is now, not as the event left it, as a rerun
+      # of an older job would: a preview while it is open into the default
+      # branch at this head, none once closed or moved, and nothing where a
+      # newer push runs its own job.
+      - name: Read the pull request
+        id: now
+        run: |
+          if [ -z "$SHOPIFY_CLI_THEME_TOKEN" ]; then
+            echo "::notice::No secret SHOPIFY_CLI_THEME_TOKEN, so no preview theme."
+            echo "act=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER")
+          state=$(jq -r .state <<< "$pr")
+          base=$(jq -r .base.ref <<< "$pr")
+          head=$(jq -r .head.sha <<< "$pr")
+          if [ "$state" != open ] || [ "$base" != "$DEFAULT_BRANCH" ]; then
+            act=delete
+          elif [ "$head" = "$SHA" ]; then
+            act=push
+          else
+            act=none
+          fi
+          echo "act=$act" >> "$GITHUB_OUTPUT"
+      - name: Checkout the pull request's head
+        if: ${{ steps.now.outputs.act == 'push' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ steps.now.outputs.act != 'none' }}
+        with:
+          node-version: 22
+      - name: Install Shopify CLI
+        if: ${{ steps.now.outputs.act != 'none' }}
+        run: npm install --global --no-audit --no-fund @shopify/cli@5.0.0
+      - name: Find the pull request's preview theme
+        if: ${{ steps.now.outputs.act != 'none' }}
+        id: theme
+        run: |
+          # The pull request's preview is the unpublished theme whose name
+          # starts with "#<number> <tag> ", <tag> this repository's, so a
+          # rebase, a renamed branch or another repository's preview on the
+          # same store never changes which one it is. A failed list, or two
+          # themes with the prefix, fail the job rather than guess. The name
+          # keeps a Sites branch's cms/<id> whole up to pull request #9999.
+          tag=$(printf '%s' "$GITHUB_REPOSITORY_ID" | sha1sum | cut -c1-3)
+          prefix="#$NUMBER $tag "
+          name="$prefix$BRANCH"
+          # Shopify takes a theme name of at most 50 characters.
+          echo "name=${name:0:50}" >> "$GITHUB_OUTPUT"
+          shopify theme list --json > "$RUNNER_TEMP/themes.json"
+          ids=$(jq -r --arg prefix "$prefix" \
+            '.themes[] | select(.role == "unpublished" and (.name | startswith($prefix))) | .id' \
+            "$RUNNER_TEMP/themes.json")
+          if [ "$(grep -c . <<< "$ids")" -gt 1 ]; then
+            echo "More than one theme starts with \"$prefix\"." >&2
+            exit 1
+          fi
+          echo "id=$ids" >> "$GITHUB_OUTPUT"
+      - name: Report building
+        if: ${{ steps.now.outputs.act == 'push' }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=pending -f context="fulldev/theme-preview/$NUMBER" \
+            -f description="Building the preview theme" > /dev/null
+      - name: Push the branch to its preview theme
+        if: ${{ steps.now.outputs.act == 'push' }}
+        working-directory: ${{ inputs.path }}
+        env:
+          NAME: ${{ steps.theme.outputs.name }}
+          ID: ${{ steps.theme.outputs.id }}
+        run: |
+          if [ -n "$ID" ]; then
+            shopify theme push --theme "$ID" --json > "$RUNNER_TEMP/push.json"
+          else
+            shopify theme push --unpublished --theme "$NAME" --json > "$RUNNER_TEMP/push.json"
+          fi
+          url=$(jq -r '.theme.previewUrl // empty' "$RUNNER_TEMP/push.json")
+          if [ -z "$url" ]; then
+            echo "Shopify CLI answered no preview link." >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=success -f context="fulldev/theme-preview/$NUMBER" \
+            -f target_url="$url" -f description="Preview theme ready" > /dev/null
+      - name: Report a failed push
+        if: ${{ failure() && steps.now.outputs.act == 'push' }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=failure -f context="fulldev/theme-preview/$NUMBER" \
+            -f description="The preview theme did not update" > /dev/null
+      - name: Delete the preview theme
+        if: ${{ steps.now.outputs.act == 'delete' && steps.theme.outputs.id != '' }}
+        env:
+          ID: ${{ steps.theme.outputs.id }}
+        run: shopify theme delete --theme "$ID" --force
+      # Its link goes with it, also on a rerun after the theme went, so a
+      # pull request reopened at this commit shows no dead preview.
+      - name: Take the preview's link away
+        if: ${{ steps.now.outputs.act == 'delete' }}
+        run: |
+          # This workflow's newest status of the context, on every page, as
+          # Sites reads it.
+          state=$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses?per_page=100" |
+            jq -s -r --arg context "fulldev/theme-preview/$NUMBER" \
+              '[add[] | select(.context == $context and .creator.login == "github-actions[bot]")][0].state // empty')
+          if [ "$state" = success ]; then
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+              -f state=error -f context="fulldev/theme-preview/$NUMBER" \
+              -f description="Preview theme removed" > /dev/null
+          fi
