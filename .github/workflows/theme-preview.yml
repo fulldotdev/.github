@@ -11,8 +11,8 @@
 # themes; a push past that fails and reports so.
 #
 # The caller runs on pull_request (opened, synchronize, reopened, edited,
-# closed) without a branch filter, grants `contents: read` and
-# `statuses: write`, and passes the store and the repository secret
+# closed) without a branch filter, grants `contents: read`,
+# `pull-requests: read` and `statuses: write`, and passes the store and the repository secret
 # SHOPIFY_CLI_THEME_TOKEN: a Theme Access password of that store.
 name: Theme preview
 
@@ -36,6 +36,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
   statuses: write
 
 jobs:
@@ -57,22 +58,43 @@ jobs:
       BRANCH: ${{ github.head_ref }}
       SHA: ${{ github.event.pull_request.head.sha }}
       NUMBER: ${{ github.event.pull_request.number }}
-      # A preview while open and into the default branch; else none.
-      WANTED: ${{ github.event.action != 'closed' && github.event.pull_request.base.ref == github.event.repository.default_branch }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      # The pull request as it is now, not as the event left it, as a rerun
+      # of an older job would: a preview while it is open into the default
+      # branch at this head, none once closed or moved, and nothing where a
+      # newer push runs its own job.
+      - name: Read the pull request
+        id: now
+        run: |
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER")
+          state=$(jq -r .state <<< "$pr")
+          base=$(jq -r .base.ref <<< "$pr")
+          head=$(jq -r .head.sha <<< "$pr")
+          if [ "$state" != open ] || [ "$base" != "$DEFAULT_BRANCH" ]; then
+            act=delete
+          elif [ "$head" = "$SHA" ]; then
+            act=push
+          else
+            act=none
+          fi
+          echo "act=$act" >> "$GITHUB_OUTPUT"
       - name: Checkout the pull request's head
-        if: ${{ env.WANTED == 'true' }}
+        if: ${{ steps.now.outputs.act == 'push' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ steps.now.outputs.act != 'none' }}
         with:
           node-version: 22
       - name: Install Shopify CLI
+        if: ${{ steps.now.outputs.act != 'none' }}
         run: npm install --global --no-audit --no-fund @shopify/cli@5.0.0
       - name: Find the pull request's preview theme
+        if: ${{ steps.now.outputs.act != 'none' }}
         id: theme
         run: |
           # Shopify takes a theme name of at most 50 characters.
@@ -83,13 +105,13 @@ jobs:
             '[.themes[] | select(.name == $name and .role == "unpublished")][0].id // empty')
           echo "id=$id" >> "$GITHUB_OUTPUT"
       - name: Report building
-        if: ${{ env.WANTED == 'true' }}
+        if: ${{ steps.now.outputs.act == 'push' }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
             -f state=pending -f context="fulldev/theme-preview/$NUMBER" \
             -f description="Building the preview theme" > /dev/null
       - name: Push the branch to its preview theme
-        if: ${{ env.WANTED == 'true' }}
+        if: ${{ steps.now.outputs.act == 'push' }}
         working-directory: ${{ inputs.path }}
         env:
           NAME: ${{ steps.theme.outputs.name }}
@@ -109,13 +131,13 @@ jobs:
             -f state=success -f context="fulldev/theme-preview/$NUMBER" \
             -f target_url="$url" -f description="Preview theme ready" > /dev/null
       - name: Report a failed push
-        if: ${{ failure() && env.WANTED == 'true' }}
+        if: ${{ failure() && steps.now.outputs.act == 'push' }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
             -f state=failure -f context="fulldev/theme-preview/$NUMBER" \
             -f description="The preview theme did not update" > /dev/null
       - name: Delete the preview theme
-        if: ${{ env.WANTED != 'true' && steps.theme.outputs.id != '' }}
+        if: ${{ steps.now.outputs.act == 'delete' && steps.theme.outputs.id != '' }}
         env:
           ID: ${{ steps.theme.outputs.id }}
         run: shopify theme delete --theme "$ID" --force
