@@ -11,8 +11,11 @@
 # it to another base branch, deletes the theme. A store holds at most 20
 # themes; a push past that fails and reports so.
 #
-# The caller runs on pull_request (opened, synchronize, reopened, edited,
-# closed) without a branch filter, grants `contents: read`,
+# The caller runs on pull_request_target (opened, synchronize, reopened,
+# edited, closed) without a branch filter, since GitHub skips pull_request
+# workflows while a pull request has a merge conflict; the job only uploads
+# the branch's files to Shopify, never runs them, and only for a branch of
+# the same repository, grants `contents: read`,
 # `pull-requests: read` and `statuses: write`, and passes the store and the repository secret
 # SHOPIFY_CLI_THEME_TOKEN: a Theme Access password of that store.
 name: Theme preview
@@ -32,8 +35,9 @@ on:
         type: string
         default: blacksmith-2vcpu-ubuntu-2404
     secrets:
+      # Without it the job skips, saying so.
       SHOPIFY_CLI_THEME_TOKEN:
-        required: true
+        required: false
 
 permissions:
   contents: read
@@ -157,14 +161,21 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
             -f state=failure -f context="fulldev/theme-preview/$NUMBER" \
             -f description="The preview theme did not update" > /dev/null
-      # Its link goes with it, so a pull request reopened at this commit
-      # shows no dead preview before its new one.
       - name: Delete the preview theme
         if: ${{ steps.now.outputs.act == 'delete' && steps.theme.outputs.id != '' }}
         env:
           ID: ${{ steps.theme.outputs.id }}
+        run: shopify theme delete --theme "$ID" --force
+      # Its link goes with it, also on a rerun after the theme went, so a
+      # pull request reopened at this commit shows no dead preview.
+      - name: Take the preview's link away
+        if: ${{ steps.now.outputs.act == 'delete' }}
         run: |
-          shopify theme delete --theme "$ID" --force
-          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
-            -f state=error -f context="fulldev/theme-preview/$NUMBER" \
-            -f description="Preview theme removed" > /dev/null
+          state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses" |
+            jq -r --arg context "fulldev/theme-preview/$NUMBER" \
+              '[.[] | select(.context == $context)][0].state // empty')
+          if [ "$state" = success ]; then
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+              -f state=error -f context="fulldev/theme-preview/$NUMBER" \
+              -f description="Preview theme removed" > /dev/null
+          fi
