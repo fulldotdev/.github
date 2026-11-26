@@ -2,11 +2,12 @@
 # Sites shows as that version's preview and where its bar edits the branch.
 # Each push to an open pull request into the default branch, from the same
 # repository, mirrors the branch to an unpublished theme named after the
-# pull request, "#<number> <branch>" (Sites's branches are cms/<id>, which
-# the bar reads from the end of the name), and reports the theme's preview
-# link as the commit status fulldev/theme-preview/<number>. Only the theme
-# that status names is updated or deleted, so a merchant's own themes and
-# other pull requests' previews, also another repository's, stay. Closing the pull request, or moving
+# pull request and the repository, "#<number> <tag> <branch>" (Sites's
+# branches are cms/<id>, which the bar reads from the end of the name), and
+# reports the theme's preview link as the commit status
+# fulldev/theme-preview/<number>. Only that pull request's theme is updated
+# or deleted, so a merchant's own themes and other pull requests' previews,
+# also another repository's on the same store, stay. Closing the pull request, or moving
 # it to another base branch, deletes the theme. A store holds at most 20
 # themes; a push past that fails and reports so.
 #
@@ -99,26 +100,20 @@ jobs:
         if: ${{ steps.now.outputs.act != 'none' }}
         id: theme
         run: |
+          # The pull request's preview is the unpublished theme whose name
+          # starts with "#<number> <tag> ", <tag> this repository's, so a
+          # rebase, a renamed branch or another repository's preview on the
+          # same store never changes which one it is. A failed list fails
+          # the job rather than make a second theme.
+          tag=$(printf '%s' "$GITHUB_REPOSITORY_ID" | sha1sum | cut -c1-3)
+          prefix="#$NUMBER $tag "
+          name="$prefix$BRANCH"
           # Shopify takes a theme name of at most 50 characters.
-          name="#$NUMBER $BRANCH"
           echo "name=${name:0:50}" >> "$GITHUB_OUTPUT"
-          # The theme this pull request's own last preview status named, so
-          # a merchant's theme, or another repository's preview on the same
-          # store, is never taken; none once the store no longer has it.
-          id=""
-          for sha in $(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/commits?per_page=100" --jq 'reverse | .[].sha'); do
-            url=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/statuses?per_page=100" |
-              jq -r --arg context "fulldev/theme-preview/$NUMBER" \
-                '[.[] | select(.context == $context and .state == "success")][0].target_url // empty')
-            if [ -n "$url" ]; then
-              id=$(sed -n 's/.*preview_theme_id=\([0-9]*\).*/\1/p' <<< "$url")
-              break
-            fi
-          done
-          if [ -n "$id" ] && ! shopify theme list --json | jq -e --arg id "$id" \
-            '.themes[] | select((.id | tostring) == $id and .role == "unpublished")' > /dev/null; then
-            id=""
-          fi
+          shopify theme list --json > "$RUNNER_TEMP/themes.json"
+          id=$(jq -r --arg prefix "$prefix" \
+            '[.themes[] | select(.role == "unpublished" and (.name | startswith($prefix)))][0].id // empty' \
+            "$RUNNER_TEMP/themes.json")
           echo "id=$id" >> "$GITHUB_OUTPUT"
       - name: Report building
         if: ${{ steps.now.outputs.act == 'push' }}
